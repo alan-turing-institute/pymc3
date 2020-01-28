@@ -45,7 +45,7 @@ def run(steppers, p):
             t_start = time.time()
             mt = pm.sample(
                 draws=10000,
-                chains=16, parallelize=False,
+                chains=16,
                 step=step_cls(),
                 start=start
             )
@@ -93,7 +93,7 @@ if __name__ == '__main__':
 
     if 'NUTS' in names:
         print('\r\nNormalized effective sampling rate [0...1]')
-        df_performance = df_performance.T / df_performance.loc[0]['NUTS']
+        df_performance = df_performance.T / float(df_performance.loc[0]['NUTS'])
     else:
         print('\r\nNormalized effective sampling rate [1/s]')
         df_performance = df_performance.T
