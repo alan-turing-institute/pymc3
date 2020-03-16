@@ -46,6 +46,7 @@ from .step_methods import (
     CategoricalGibbsMetropolis,
     DEMetropolis,
     Slice,
+    MLDA,
     CompoundStep,
     arraystep,
 )
