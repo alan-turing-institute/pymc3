@@ -682,7 +682,6 @@ class DEMetropolis(PopulationArrayStepShared):
         return Competence.COMPATIBLE
 
 
-
 class DEMetropolisZ(ArrayStepShared):
     """
     Adaptive Differential Evolution Metropolis sampling step that uses the past to inform jumps.
@@ -854,13 +853,6 @@ class DEMetropolisZ(ArrayStepShared):
         if var.dtype in pm.discrete_types:
             return Competence.INCOMPATIBLE
         return Competence.COMPATIBLE
-
-
-def sample_except(limit, excluded):
-    candidate = nr.choice(limit - 1)
-    if candidate >= excluded:
-        candidate += 1
-    return candidate
 
 
 class MLDA(ArrayStepShared):
