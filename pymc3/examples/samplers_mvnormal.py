@@ -45,14 +45,14 @@ def run(steppers, p):
             t_start = time.time()
             mt = pm.sample(
                 draws=10000,
-                chains=16,
+                chains=16, parallelize=False,
                 step=step_cls(),
                 start=start
             )
             runtimes[name] = time.time() - t_start
             print('{} samples across {} chains'.format(len(mt) * mt.nchains, mt.nchains))
             traces[name] = mt
-            en = pm.ess(mt)
+            en = pm.diagnostics.effective_n(mt)
             print('effective: {}\r\n'.format(en))
             if USE_XY:
                 effn[name] = np.mean(en['x']) / len(mt) / mt.nchains
@@ -93,7 +93,7 @@ if __name__ == '__main__':
 
     if 'NUTS' in names:
         print('\r\nNormalized effective sampling rate [0...1]')
-        df_performance = df_performance.T / float(df_performance.loc[0]['NUTS'])
+        df_performance = df_performance.T / df_performance.loc[0]['NUTS']
     else:
         print('\r\nNormalized effective sampling rate [1/s]')
         df_performance = df_performance.T
