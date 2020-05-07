@@ -1063,18 +1063,31 @@ class TestMLDA:
             assert isinstance(sampler.next_step_method.next_step_method, Metropolis)
             assert np.all(sampler.next_step_method.next_step_method.proposal_dist.s == s)
 
-    def test_exit_on_no_coarse_models(self):
-        """Test that MLDA generates warning when no coarse models are passed"""
-        with pytest.raises(SystemExit) as pytest_wrapped_e:
+    def test_exceptions_coarse_models(self):
+        """Test that MLDA generates the expected exceptions when no coarse_models arg
+        is passed, an empty list is passed or when coarse_models is not a list"""
+        with pytest.raises(TypeError) as pytest_wrapped_e:
             _, model, _ = mv_simple()
             with model:
                 MLDA()
-        assert pytest_wrapped_e.type == SystemExit
-        assert pytest_wrapped_e.value.code == 'MLDA step method was not given a ' \
-                                              'set of multi-level coarse models. ' \
-                                              'Either provide a list of models ' \
-                                              'using argument coarse_modelsor use ' \
-                                              'another step method.'
+        assert pytest_wrapped_e.type == TypeError
+
+        with pytest.raises(ValueError) as pytest_wrapped_e:
+            _, model, _ = mv_simple()
+            with model:
+                MLDA(coarse_models=[])
+        assert pytest_wrapped_e.type == ValueError
+        assert pytest_wrapped_e.value.args[0] == "MLDA step method was given an empty " \
+                                              "list of coarse models. Give at least " \
+                                              "one coarse model."
+
+        with pytest.raises(ValueError) as pytest_wrapped_e:
+            _, model, _ = mv_simple()
+            with model:
+                MLDA(coarse_models=(model, model))
+        assert pytest_wrapped_e.type == ValueError
+        assert pytest_wrapped_e.value.args[0] == "MLDA step method cannot use " \
+                                              "coarse_models if it is not a list"
 
     def test_nonparallelized_chains_are_random(self):
         """Test that parallel chain are not identical when no parallelisation
@@ -1092,7 +1105,6 @@ class TestMLDA:
                     "Non parallelized {} " "chains are identical.".format(
                     stepper
                 )
-        pass
 
     def test_parallelized_chains_are_random(self):
         """Test that parallel chain are
@@ -1113,7 +1125,6 @@ class TestMLDA:
                     "Parallelized {} " "chains are identical.".format(
                     stepper
                 )
-        pass
 
     def test_acceptance_rate_against_coarseness(self):
         """Test that the acceptance rate increases
@@ -1168,6 +1179,7 @@ class TestMLDA:
                                                   "linalg issues"
     )
     def test_blocked(self):
+        """Test the type of base sampler instantiated when switching base_blocked flag"""
         _, model = simple_2model_continuous()
         _, model_coarse = simple_2model_continuous()
         with model:
