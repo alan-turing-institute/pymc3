@@ -1001,13 +1001,6 @@ class MLDA(ArrayStepShared):
 
         self.accepted = 0
 
-        # Determine type of variables
-        self.discrete = np.concatenate(
-            [[v.dtype in pm.discrete_types] *
-             (v.dsize or 1) for v in vars])
-        self.any_discrete = self.discrete.any()
-        self.all_discrete = self.discrete.all()
-
         # Construct theano function for current-level model likelihood
         # (for use in acceptance)
         shared = pm.make_shared_replacements(vars,
@@ -1102,6 +1095,8 @@ class MLDA(ArrayStepShared):
 
     @staticmethod
     def competence(var, has_grad):
+        if var.dtype in pm.discrete_types:
+            return Competence.INCOMPATIBLE
         return Competence.COMPATIBLE
 
 
