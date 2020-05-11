@@ -17,15 +17,18 @@ import numpy.random as nr
 import theano
 import scipy.linalg
 import warnings
+import logging
 
 from ..distributions import draw_values
 from .arraystep import ArrayStepShared, PopulationArrayStepShared, ArrayStep, metrop_select, Competence
+from .compound import CompoundStep
 import pymc3 as pm
 from pymc3.theanof import floatX
 
 __all__ = ['Metropolis', 'DEMetropolis', 'DEMetropolisZ', 'BinaryMetropolis', 'BinaryGibbsMetropolis',
            'CategoricalGibbsMetropolis', 'NormalProposal', 'CauchyProposal',
-           'LaplaceProposal', 'PoissonProposal', 'MultivariateNormalProposal']
+           'LaplaceProposal', 'PoissonProposal', 'MultivariateNormalProposal',
+           'RecursiveDAProposal', 'MLDA']
 
 # Available proposal distributions for Metropolis
 
@@ -76,6 +79,60 @@ class MultivariateNormalProposal(Proposal):
         else:
             b = np.random.randn(self.n)
             return np.dot(self.chol, b)
+
+
+class RecursiveDAProposal(Proposal):
+    """
+    Recursive Delayed Acceptance proposal to be used with MLDA step sampler.
+    Recursively calls an MLDA sampler if level > 0 and calls Metropolis
+    sampler if level = 0. The sampler generates subsampling_rate samples and
+    the last one is used as a proposal. Results in a hierarchy of chains
+    each of which is used to propose samples to the chain above.
+    """
+    def __init__(self, next_step_method, next_model,
+                 tune, subsampling_rate):
+
+        self.next_step_method = next_step_method
+        self.next_model = next_model
+        self.tune = tune
+        self.subsampling_rate = subsampling_rate
+
+    def __call__(self, q0_dict):
+        """Returns proposed sample  given the current sample
+        in dictionary form (q0_dict).
+        """
+
+        # Logging is reduced to avoid extensive console output
+        # during multiple recursive calls of sample()
+        _log = logging.getLogger('pymc3')
+        _log.setLevel(logging.ERROR)
+
+        with self.next_model:
+            # Check if the tuning flag has been set to False
+            # in which case tuning is stopped. The flag is set
+            # to False (by MLDA's astep) when the burn-in
+            # iterations of the highest-level MLDA sampler run out.
+            # The change propagates to all levels.
+            if self.tune:
+                # Sample in tuning mode
+                output = pm.sample(draws=0, step=self.next_step_method,
+                                   start=q0_dict, tune=self.subsampling_rate,
+                                   chains=1, progressbar=False,
+                                   compute_convergence_checks=False,
+                                   discard_tuned_samples=False).point(-1)
+            else:
+                # Sample in normal mode without tuning
+                output = pm.sample(draws=self.subsampling_rate,
+                                   step=self.next_step_method,
+                                   start=q0_dict, tune=0, chains=1,
+                                   progressbar=False,
+                                   compute_convergence_checks=False,
+                                   discard_tuned_samples=False).point(-1)
+
+        # set logging back to normal
+        _log.setLevel(logging.NOTSET)
+
+        return output
 
 
 class Metropolis(ArrayStepShared):
@@ -154,6 +211,10 @@ class Metropolis(ArrayStepShared):
         )
 
         self.mode = mode
+
+        # flag to indicate this stepper was instantiated within an MLDA stepper
+        # used to decide if the tuning parameters are reset when iter_sample() is called
+        self.is_mlda_base = kwargs.pop("is_mlda_base", False)
 
         shared = pm.make_shared_replacements(vars, model)
         self.delta_logp = delta_logp(model.logpt, vars, shared)
@@ -578,7 +639,7 @@ class DEMetropolis(PopulationArrayStepShared):
 
         if S is None:
             S = np.ones(model.ndim)
-        
+
         if proposal_dist is not None:
             self.proposal_dist = proposal_dist(S)
         else:
@@ -761,6 +822,7 @@ class DEMetropolisZ(ArrayStepShared):
                 self.scaling = tune(self.scaling, self.accepted / float(self.tune_interval))
             elif self.tune_target == 'lambda':
                 self.lamb = tune(self.lamb, self.accepted / float(self.tune_interval))
+
             # Reset counter
             self.steps_until_tune = self.tune_interval
             self.accepted = 0
@@ -789,7 +851,6 @@ class DEMetropolisZ(ArrayStepShared):
         q_new, accepted = metrop_select(accept, q, q0)
         self.accepted += accepted
         self._history.append(q_new)
-
         self.steps_until_tune -= 1
 
         stats = {
@@ -813,6 +874,286 @@ class DEMetropolisZ(ArrayStepShared):
 
     @staticmethod
     def competence(var, has_grad):
+        if var.dtype in pm.discrete_types:
+            return Competence.INCOMPATIBLE
+        return Competence.COMPATIBLE
+
+
+class MLDA(ArrayStepShared):
+    """
+    Multi-Level Delayed Acceptance (MLDA) sampling step that uses coarse
+    approximations of a fine model to construct proposals in multiple levels.
+
+    MLDA creates a hierarchy of MCMC chains. Chains sample from different
+    posteriors that ideally should be approximations of the fine (top-level)
+    posterior and require less computational effort to evaluate their likelihood.
+
+    Each chain runs for a fixed number of iterations (subsampling_rate) and then
+    the last sample generated is used as a proposal for the chain in the level
+    above. The bottom-level chain is a Metropolis sampler. The algorithm achieves
+    much higher acceptance rate and effective sample sizes than other samplers
+    if the coarse models are sufficiently good approximations of the fine one.
+
+    Parameters
+    ----------
+    coarse_models : list
+        List of coarse (multi-level) models, where the first model
+        is the coarsest one (level=0) and the last model is the
+        second finest one (level=L-1 where L is the number of levels).
+        Note this list excludes the model passed to the model
+        argument above, which is the finest available.
+    vars : list
+        List of variables for sampler
+    base_S : standard deviation of base proposal covariance matrix
+        Some measure of variance to parameterize base proposal distribution
+    base_proposal_dist : function
+        Function that returns zero-mean deviates when parameterized with
+        S (and n). Defaults to normal. This is the proposal used in the
+        coarsest (base) chain, i.e. level=0.
+    base_scaling : scalar or array
+        Initial scale factor for base proposal. Defaults to 1.
+    tune : bool
+        Flag for tuning for the base proposal. Defaults to True.
+    base_tune_interval : int
+        The frequency of tuning for the base proposal. Defaults to 100
+        iterations.
+    model : PyMC Model
+        Optional model for sampling step. Defaults to None
+        (taken from context). This model should be the finest of all
+        multilevel models.
+    mode :  string or `Mode` instance.
+        Compilation mode passed to Theano functions
+    subsampling_rate : int
+        Number of samples generated in level l-1 to propose a sample
+        for level l.
+    base_blocked : bool
+        To flag to choose whether base sampler (level=0) is a
+        Compound Metropolis step (base_blocked=False)
+        or a blocked Metropolis step (base_blocked=True).
+
+    Examples
+    ----------
+    .. code:: ipython
+
+        >>> import pymc3 as pm
+        ... datum = 1
+        ...
+        ... with pm.Model() as coarse_model:
+        ...     x = Normal("x", mu=0, sigma=10)
+        ...     y = Normal("y", mu=x, sigma=1, observed=datum - 0.1)
+        ...
+        ... with pm.Model():
+        ...     x = Normal("x", mu=0, sigma=10)
+        ...     y = Normal("y", mu=x, sigma=1, observed=datum)
+        ...     step_method = pm.MLDA(coarse_models=[coarse_model]
+        ...                           subsampling_rate=5)
+        ...     trace = pm.sample(ndraws=500, chains=2,
+        ...                       tune=100, step=step_method,
+        ...                       random_seed=123)
+        ...
+        ... pm.summary(trace)
+            mean     sd	     hpd_3%	   hpd_97%
+        x	1.011	 0.975	 -0.925	   2.824
+
+    A more complete example of how to use MLDA in a realistic
+    multilevel problem can be found in:
+    pymc3/docs/source/notebooks/multi-level_groundwater_flow_with_MLDA.ipynb
+
+    References
+    ----------
+    .. [Dodwell2019] Dodwell, Tim & Ketelsen, Chris & Scheichl,
+    Robert & Teckentrup, Aretha. (2019).
+    Multilevel Markov Chain Monte Carlo.
+    SIAM Review. 61. 509-545.
+        `link <https://doi.org/10.1137/19M126966X>`__
+    """
+    name = 'mlda'
+
+    # All levels use block sampling,
+    # except level 0 where the user can choose
+    default_blocked = True
+    generates_stats = True
+
+    # These stats are extended within __init__
+    stats_dtypes = [{
+        'accept': np.float64,
+        'accepted': np.bool,
+        'tune': np.bool
+    }]
+
+    def __init__(self, coarse_models, vars=None, base_S=None, base_proposal_dist=None,
+                 base_scaling=1., tune=True, base_tune_interval=100, model=None, mode=None,
+                 subsampling_rate=5, base_blocked=False, **kwargs):
+
+        warnings.warn(
+            'The MLDA implementation in PyMC3 is very young. '
+            'You should be extra critical about its results.'
+        )
+
+        model = pm.modelcontext(model)
+
+        # assign internal state
+        self.coarse_models = coarse_models
+        if not isinstance(coarse_models, list):
+            raise ValueError("MLDA step method cannot use "
+                             "coarse_models if it is not a list")
+        if len(self.coarse_models) == 0:
+            raise ValueError("MLDA step method was given an empty "
+                             "list of coarse models. Give at least "
+                             "one coarse model.")
+        self.num_levels = len(self.coarse_models) + 1
+        self.base_S = base_S
+        self.base_proposal_dist = base_proposal_dist
+        self.base_scaling = base_scaling
+        self.tune = tune
+        self.base_tune_interval = base_tune_interval
+        self.model = model
+        self.next_model = self.coarse_models[-1]
+        self.mode = mode
+        self.subsampling_rate = subsampling_rate
+        self.base_blocked = base_blocked
+        self.base_scaling_stats = None
+
+        # Process model variables
+        if vars is None:
+            vars = model.vars
+        vars = pm.inputvars(vars)
+        self.vars = vars
+        self.var_names = [var.name for var in self.vars]
+
+        self.accepted = 0
+
+        # Construct theano function for current-level model likelihood
+        # (for use in acceptance)
+        shared = pm.make_shared_replacements(vars,
+                                             model)
+        self.delta_logp = delta_logp(model.logpt,
+                                     vars,
+                                     shared)
+
+        # Construct theano function for next-level model likelihood
+        # (for use in acceptance)
+        next_model = pm.modelcontext(self.next_model)
+        vars_next = [var for var in next_model.vars if var.name in self.var_names]
+        vars_next = pm.inputvars(vars_next)
+        shared_next = pm.make_shared_replacements(vars_next,
+                                                  next_model)
+        self.delta_logp_next = delta_logp(next_model.logpt,
+                                          vars_next,
+                                          shared_next)
+
+        super().__init__(vars, shared)
+
+        # initialise complete step method hierarchy
+        if self.num_levels == 2:
+            with self.next_model:
+                # make sure the correct variables are selected from next_model
+                vars_next = [var for var in self.next_model.vars
+                             if var.name in self.var_names]
+                # Metropolis sampler in base level (level=0), targeting self.next_model
+                # is_mlda_base is set to True to prevent tuning reset
+                # between MLDA iterations - note that Metropolis is used
+                # with only one chain and therefore the scaling reset issue
+                # (see issue #3733 in GitHub) will not appear here
+                self.next_step_method = pm.Metropolis(vars=vars_next,
+                                                      proposal_dist=self.base_proposal_dist,
+                                                      S=self.base_S,
+                                                      scaling=self.base_scaling, tune=self.tune,
+                                                      tune_interval=self.base_tune_interval,
+                                                      model=None,
+                                                      blocked=self.base_blocked,
+                                                      **{"is_mlda_base": True})
+        else:
+            # drop the last coarse model
+            next_coarse_models = self.coarse_models[:-1]
+            with self.next_model:
+                # make sure the correct variables are selected from next_model
+                vars_next = [var for var in self.next_model.vars
+                             if var.name in self.var_names]
+                # MLDA sampler in some intermediate level, targeting self.next_model
+                self.next_step_method = pm.MLDA(vars=vars_next, base_S=self.base_S,
+                                                base_proposal_dist=self.base_proposal_dist,
+                                                base_scaling=self.base_scaling,
+                                                tune=self.tune,
+                                                base_tune_interval=self.base_tune_interval,
+                                                model=None, mode=self.mode,
+                                                subsampling_rate=self.subsampling_rate,
+                                                coarse_models=next_coarse_models,
+                                                base_blocked=self.base_blocked,
+                                                **kwargs)
+
+        # instantiate the recursive DA proposal.
+        # this is the main proposal used for
+        # all levels (Recursive Delayed Acceptance)
+        # (except for level 0 where the step method is Metropolis and not MLDA)
+        self.proposal_dist = RecursiveDAProposal(self.next_step_method,
+                                                 self.next_model,
+                                                 self.tune,
+                                                 self.subsampling_rate)
+
+        # Update stats data types dictionary given vars and base_blocked
+        if self.base_blocked or len(self.vars) == 1:
+            self.stats_dtypes[0]['base_scaling'] = np.float64
+        else:
+            for name in self.var_names:
+                self.stats_dtypes[0]['base_scaling_' + name] = np.float64
+
+    def astep(self, q0):
+        """One MLDA step, given current sample q0"""
+        # Check if tuning has been deactivated and if yes,
+        # change the proposal's tuning flag and reset self.accepted
+        # This is initially triggered in the highest-level MLDA step
+        # method (within iter_sample) and then propagates to all levels.
+        if self.proposal_dist.tune != self.tune:
+            self.proposal_dist.tune = self.tune
+            self.accepted = 0
+
+        # Convert current sample from numpy array ->
+        # dict before feeding to proposal
+        q0_dict = self.bij.rmap(q0)
+
+        # Call the recursive DA proposal to get proposed sample
+        # and convert dict -> numpy array
+        q = self.bij.map(self.proposal_dist(q0_dict))
+
+        # Evaluate MLDA acceptance log-ratio
+        # If proposed sample from lower levels is the same as current one,
+        # do not calculate likelihood, just set accept to 0.0
+        if (q == q0).all():
+            accept = np.float(0.0)
+        else:
+            accept = self.delta_logp(q, q0) + self.delta_logp_next(q0, q)
+
+        # Accept/reject sample - next sample is stored in q_new
+        q_new, accepted = metrop_select(accept, q, q0)
+
+        # Update acceptance counter
+        self.accepted += accepted
+
+        stats = {
+            'tune': self.tune,
+            'accept': np.exp(accept),
+            'accepted': accepted
+        }
+
+        # Capture latest base chain scaling stats from next step method
+        self.base_scaling_stats = {}
+        if isinstance(self.next_step_method, CompoundStep):
+            for method in self.next_step_method.methods:
+                self.base_scaling_stats["base_scaling_" + method.vars[0].name] = method.scaling
+        elif isinstance(self.next_step_method, Metropolis):
+            self.base_scaling_stats["base_scaling"] = self.next_step_method.scaling
+        else:
+            # next method is MLDA
+            self.base_scaling_stats = self.next_step_method.base_scaling_stats
+        stats = {**stats, **self.base_scaling_stats}
+
+        return q_new, [stats]
+
+    @staticmethod
+    def competence(var, has_grad):
+        """Return MLDA competence for given var/has_grad. MLDA currently works
+        only with continuous variables."""
         if var.dtype in pm.discrete_types:
             return Competence.INCOMPATIBLE
         return Competence.COMPATIBLE
