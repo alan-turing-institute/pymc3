@@ -1115,17 +1115,17 @@ class MLDA(ArrayStepShared):
                                 "in the model definition is not of type "
                                 "'TensorSharedVariable'. Use pm.Data() to define those"
                                 "variables.")
-            if not ((model.mu_B.dshape == (len(model.vars), )) and
-                    (model.Sigma_B.dshape == (len(model.vars), len(model.vars)))):
-                raise ValueError(f"Model variables 'mu_B' and 'Sigma_B' should have "
-                                 "dimension ({len(model.vars)}, ) and "
-                                 "({len(model.vars)}, {len(model.vars)}) but they"
-                                 "have dimensions {model.mu_B.dshape} and "
-                                 "{model.Sigma_B.dshape}")
+            #if not ((model.mu_B.dshape == (len(model.vars), )) and
+            #        (model.Sigma_B.dshape == (len(model.vars), len(model.vars)))):
+            #    raise ValueError(f"Model variables 'mu_B' and 'Sigma_B' should have "
+            #                     f"dimension ({len(model.vars)}, ) and "
+            #                     f"({len(model.vars)}, {len(model.vars)}) but they "
+            #                     f"have dimensions {model.mu_B.dshape} and "
+            #                     f"{model.Sigma_B.dshape}")
 
             # initialise the error correction terms
-            pm.set_data({'mu_B': np.zeros(len(model.vars))})
-            pm.set_data({'Sigma_B': np.identity(len(model.vars))})
+            pm.set_data({'mu_B': np.zeros(model.mu_B.get_value().shape)})
+            pm.set_data({'Sigma_B': np.zeros(model.Sigma_B.get_value().shape)})
 
         if isinstance(subsampling_rates, int):
             self.subsampling_rates = [subsampling_rates] * len(self.coarse_models)
@@ -1293,8 +1293,8 @@ class MLDA(ArrayStepShared):
         q = self.bij.map(self.proposal_dist(q0_dict))
 
         # Update error approximation mean and variance
-        pm.set_data({'mu_B': np.array([9., 9.])})
-        pm.set_data({'Sigma_B': np.array([[19., 0.], [0., 19.]])})
+        #pm.set_data({'mu_B': np.array([9., 9.])})
+        #pm.set_data({'Sigma_B': np.array([[19., 0.], [0., 19.]])})
 
         # Evaluate MLDA acceptance log-ratio
         # If proposed sample from lower levels is the same as current one,
