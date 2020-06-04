@@ -25,6 +25,8 @@ from .compound import CompoundStep
 import pymc3 as pm
 from pymc3.theanof import floatX
 
+import theano.tensor as tt
+
 __all__ = ['Metropolis', 'DEMetropolis', 'DEMetropolisZ', 'BinaryMetropolis', 'BinaryGibbsMetropolis',
            'CategoricalGibbsMetropolis', 'UniformProposal', 'NormalProposal', 'CauchyProposal',
            'LaplaceProposal', 'PoissonProposal', 'MultivariateNormalProposal',
@@ -970,6 +972,12 @@ class MLDA(ArrayStepShared):
         To flag to choose whether base sampler (level=0) is a
         Compound Metropolis step (base_blocked=False)
         or a blocked Metropolis step (base_blocked=True).
+    adaptive_error_correction : bool
+        When True, MLDA will use the adaptive error correction method
+        proposed in [Cui2012]. The method requires
+        the likelihood of the model to be adaptive and thus only
+        works when the user writes the model definition in a
+        certain way that is demonstrated in the examples.
 
     Examples
     ----------
@@ -1006,6 +1014,9 @@ class MLDA(ArrayStepShared):
     Multilevel Markov Chain Monte Carlo.
     SIAM Review. 61. 509-545.
         `link <https://doi.org/10.1137/19M126966X>`__
+    .. [Cui2012] Cui, Tiangang & Fox, Colin & O'Sullivan, Michael.
+    (2012). Adaptive Error Modelling in MCMC Sampling for Large
+    Scale Inverse Problems.
     """
     name = 'mlda'
 
@@ -1022,11 +1033,51 @@ class MLDA(ArrayStepShared):
         'base_scaling': object
     }]
 
+    class EvolvingMean:
+        """
+        EvolvingMean iteratively constructs a mean.
+        """
+        def __init__(self, mu_0, t=1):
+            self.mu = mu_0
+            self.t = t
+
+        def __call__(self):
+            return self.mu
+
+        def update(self, x):
+            self.mu = 1 / (self.t + 1) * (self.t * self.mu + x)
+            self.t += 1
+
+    class EvolvingCovariance:
+        """
+        EvolvingCovariance iteratively constructs a covariance matrix, using an EvolvingMean.
+        """
+        def __init__(self, evolving_mean, sigma_0):
+            self.mu = evolving_mean
+            self.sigma = sigma_0
+            self.mu_prev = None
+
+        def __call__(self):
+            return self.sigma
+
+        def update(self, x):
+            self.mu_prev = self.mu().copy()
+            self.mu.update(x)
+            self.sigma = self.compute_sigma(x)
+
+        def compute_sigma(self, x):
+            t = self.mu.t - 1
+            return (t - 1) / t * self.sigma + 1 / t * \
+                   (t * np.outer(self.mu_prev, self.mu_prev) -
+                    (t + 1) * np.outer(self.mu(), self.mu()) +
+                    np.outer(x, x))
+
     def __init__(self, coarse_models, vars=None, base_sampler='DEMetropolisZ',
                  base_S=None, base_proposal_dist=None, base_scaling=None,
                  tune=True, base_tune_target='lambda', base_tune_interval=100,
                  base_lamb=None, base_tune_drop_fraction=0.9, model=None, mode=None,
-                 subsampling_rates=5, base_blocked=False, **kwargs):
+                 subsampling_rates=5, base_blocked=False,
+                 adaptive_error_correction=False, **kwargs):
 
         warnings.warn(
             'The MLDA implementation in PyMC3 is very young. '
@@ -1044,6 +1095,38 @@ class MLDA(ArrayStepShared):
             raise ValueError("MLDA step method was given an empty "
                              "list of coarse models. Give at least "
                              "one coarse model.")
+
+        if adaptive_error_correction:
+            if not hasattr(model, 'mu_B'):
+                raise AttributeError("Model does not contain"
+                                     "variable 'mu_B'. You need to include"
+                                     "the variable in the model definition"
+                                     "for adaptive error correction to work."
+                                     "Use pm.Data() to define it.")
+            if not hasattr(model, 'Sigma_B'):
+                raise AttributeError("Model does not contain"
+                                     "variable 'Sigma_B'. You need to include"
+                                     "the variable in the model definition"
+                                     "for adaptive error correction to work."
+                                     "Use pm.Data() to define it.")
+            if not (isinstance(model.mu_B, tt.sharedvar.TensorSharedVariable) and
+                    isinstance(model.Sigma_B, tt.sharedvar.TensorSharedVariable)):
+                raise TypeError("At least one of the variables 'mu_B' and 'Sigma_B'"
+                                "in the model definition is not of type "
+                                "'TensorSharedVariable'. Use pm.Data() to define those"
+                                "variables.")
+            if not ((model.mu_B.dshape == (len(model.vars), )) and
+                    (model.Sigma_B.dshape == (len(model.vars), len(model.vars)))):
+                raise ValueError(f"Model variables 'mu_B' and 'Sigma_B' should have "
+                                 "dimension ({len(model.vars)}, ) and "
+                                 "({len(model.vars)}, {len(model.vars)}) but they"
+                                 "have dimensions {model.mu_B.dshape} and "
+                                 "{model.Sigma_B.dshape}")
+
+            # initialise the error correction terms
+            pm.set_data({'mu_B': np.zeros(len(model.vars))})
+            pm.set_data({'Sigma_B': np.identity(len(model.vars))})
+
         if isinstance(subsampling_rates, int):
             self.subsampling_rates = [subsampling_rates] * len(self.coarse_models)
         else:
@@ -1052,6 +1135,7 @@ class MLDA(ArrayStepShared):
                                  f"length as list of coarse models but the lengths "
                                  f"were {len(subsampling_rates)}, {len(self.coarse_models)}")
             self.subsampling_rates = subsampling_rates
+
         self.num_levels = len(self.coarse_models) + 1
         self.base_sampler = base_sampler
         self.base_S = base_S
@@ -1110,7 +1194,7 @@ class MLDA(ArrayStepShared):
         self.delta_logp_next = delta_logp(next_model.logpt,
                                           vars_next,
                                           shared_next)
-
+        self.model = model
         super().__init__(vars, shared)
 
         # initialise complete step method hierarchy
@@ -1208,6 +1292,10 @@ class MLDA(ArrayStepShared):
         # and convert dict -> numpy array
         q = self.bij.map(self.proposal_dist(q0_dict))
 
+        # Update error approximation mean and variance
+        pm.set_data({'mu_B': np.array([9., 9.])})
+        pm.set_data({'Sigma_B': np.array([[19., 0.], [0., 19.]])})
+
         # Evaluate MLDA acceptance log-ratio
         # If proposed sample from lower levels is the same as current one,
         # do not calculate likelihood, just set accept to 0.0
@@ -1288,5 +1376,5 @@ def delta_logp(logp, vars, shared):
     logp1 = pm.CallableTensor(logp0)(inarray1)
 
     f = theano.function([inarray1, inarray0], logp1 - logp0)
-    f.trust_input = True
+    f.trust_input = False
     return f
