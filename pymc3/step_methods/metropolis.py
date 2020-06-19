@@ -32,6 +32,7 @@ __all__ = ['Metropolis', 'DEMetropolis', 'DEMetropolisZ', 'BinaryMetropolis', 'B
            'LaplaceProposal', 'PoissonProposal', 'MultivariateNormalProposal',
            'RecursiveDAProposal', 'MLDA']
 
+
 # Available proposal distributions for Metropolis
 
 
@@ -226,6 +227,7 @@ class Metropolis(ArrayStepShared):
 
         shared = pm.make_shared_replacements(vars, model)
         self.delta_logp = delta_logp(model.logpt, vars, shared)
+        self.model = model
         super().__init__(vars, shared)
 
     def reset_tuning(self):
@@ -260,6 +262,7 @@ class Metropolis(ArrayStepShared):
             q = floatX(q0 + delta)
 
         accept = self.delta_logp(q, q0)
+
         q_new, accepted = metrop_select(accept, q, q0)
         self.accepted += accepted
 
@@ -776,7 +779,7 @@ class DEMetropolisZ(ArrayStepShared):
 
         if S is None:
             S = np.ones(model.ndim)
-        
+
         if proposal_dist is not None:
             self.proposal_dist = proposal_dist(S)
         else:
@@ -851,7 +854,7 @@ class DEMetropolisZ(ArrayStepShared):
             iz2 = np.random.randint(it)
             while iz2 == iz1:
                 iz2 = np.random.randint(it)
-            
+
             z1 = self._history[iz1]
             z2 = self._history[iz2]
             # propose a jump
@@ -1035,7 +1038,8 @@ class MLDA(ArrayStepShared):
 
     class EvolvingMean:
         """
-        EvolvingMean iteratively constructs a mean.
+        EvolvingMean iteratively constructs mu_B,
+        i.e. the model bias mean
         """
         def __init__(self, mu_0, t=1):
             self.mu = mu_0
@@ -1044,33 +1048,35 @@ class MLDA(ArrayStepShared):
         def __call__(self):
             return self.mu
 
-        def update(self, x):
-            self.mu = 1 / (self.t + 1) * (self.t * self.mu + x)
+        def update(self, diff):
+            self.mu = 1 / (self.t + 1) * (self.t * self.mu + diff)
             self.t += 1
 
     class EvolvingCovariance:
         """
-        EvolvingCovariance iteratively constructs a covariance matrix, using an EvolvingMean.
+        EvolvingCovariance iteratively constructs
+        Sigma_B, i.e the model bias
+        covariance matrix, using an EvolvingMean.
         """
-        def __init__(self, evolving_mean, sigma_0):
+        def __init__(self, evolving_mean, sigma):
             self.mu = evolving_mean
-            self.sigma = sigma_0
+            self.sigma = sigma
             self.mu_prev = None
 
         def __call__(self):
             return self.sigma
 
-        def update(self, x):
+        def update(self, diff):
             self.mu_prev = self.mu().copy()
-            self.mu.update(x)
-            self.sigma = self.compute_sigma(x)
+            self.mu.update(diff)
+            self.sigma = self.compute_sigma(diff)
 
-        def compute_sigma(self, x):
+        def compute_sigma(self, diff):
             t = self.mu.t - 1
             return (t - 1) / t * self.sigma + 1 / t * \
                    (t * np.outer(self.mu_prev, self.mu_prev) -
                     (t + 1) * np.outer(self.mu(), self.mu()) +
-                    np.outer(x, x))
+                    np.outer(diff, diff))
 
     def __init__(self, coarse_models, vars=None, base_sampler='DEMetropolisZ',
                  base_S=None, base_proposal_dist=None, base_scaling=None,
@@ -1088,6 +1094,9 @@ class MLDA(ArrayStepShared):
 
         # assign internal state
         self.coarse_models = coarse_models
+        self.next_model = self.coarse_models[-1]
+        self.adaptive_error_correction = adaptive_error_correction
+
         if not isinstance(coarse_models, list):
             raise ValueError("MLDA step method cannot use "
                              "coarse_models if it is not a list")
@@ -1096,23 +1105,23 @@ class MLDA(ArrayStepShared):
                              "list of coarse models. Give at least "
                              "one coarse model.")
 
-        if adaptive_error_correction:
-            if not hasattr(model, 'mu_B'):
-                raise AttributeError("Model does not contain"
+        if self.adaptive_error_correction:
+            if not hasattr(self.next_model, 'mu_B'):
+                raise AttributeError("Next model in hierarchy does not contain"
                                      "variable 'mu_B'. You need to include"
                                      "the variable in the model definition"
                                      "for adaptive error correction to work."
                                      "Use pm.Data() to define it.")
-            if not hasattr(model, 'Sigma_B'):
-                raise AttributeError("Model does not contain"
+            if not hasattr(self.next_model, 'Sigma_B'):
+                raise AttributeError("Next model in hierarchy does not contain"
                                      "variable 'Sigma_B'. You need to include"
                                      "the variable in the model definition"
                                      "for adaptive error correction to work."
                                      "Use pm.Data() to define it.")
-            if not (isinstance(model.mu_B, tt.sharedvar.TensorSharedVariable) and
-                    isinstance(model.Sigma_B, tt.sharedvar.TensorSharedVariable)):
+            if not (isinstance(self.next_model.mu_B, tt.sharedvar.TensorSharedVariable) and
+                    isinstance(self.next_model.Sigma_B, tt.sharedvar.TensorSharedVariable)):
                 raise TypeError("At least one of the variables 'mu_B' and 'Sigma_B'"
-                                "in the model definition is not of type "
+                                "in the next model's definition is not of type "
                                 "'TensorSharedVariable'. Use pm.Data() to define those"
                                 "variables.")
             #if not ((model.mu_B.dshape == (len(model.vars), )) and
@@ -1124,8 +1133,13 @@ class MLDA(ArrayStepShared):
             #                     f"{model.Sigma_B.dshape}")
 
             # initialise the error correction terms
-            pm.set_data({'mu_B': np.zeros(model.mu_B.get_value().shape)})
-            pm.set_data({'Sigma_B': np.zeros(model.Sigma_B.get_value().shape)})
+            with self.next_model:
+                pm.set_data({'mu_B': np.zeros(self.next_model.mu_B.get_value().shape)})
+                pm.set_data({'Sigma_B': np.zeros(self.next_model.Sigma_B.get_value().shape)})
+            self.mu_B = self.EvolvingMean(self.next_model.mu_B.get_value())
+            self.Sigma_B = self.EvolvingCovariance(self.mu_B, self.next_model.Sigma_B.get_value())
+            self.last_synced_output_diff = None
+            self.adaptation_started = False
 
         if isinstance(subsampling_rates, int):
             self.subsampling_rates = [subsampling_rates] * len(self.coarse_models)
@@ -1160,7 +1174,7 @@ class MLDA(ArrayStepShared):
         self.base_lamb = base_lamb
         self.base_tune_drop_fraction = float(base_tune_drop_fraction)
         self.model = model
-        self.next_model = self.coarse_models[-1]
+
         self.mode = mode
         self.base_blocked = base_blocked
         self.base_scaling_stats = None
@@ -1180,9 +1194,9 @@ class MLDA(ArrayStepShared):
         # (for use in acceptance)
         shared = pm.make_shared_replacements(vars,
                                              model)
-        self.delta_logp = delta_logp(model.logpt,
-                                     vars,
-                                     shared)
+        self.delta_logp = delta_logp_inverse(model.logpt,
+                                             vars,
+                                             shared)
 
         # Construct theano function for next-level model likelihood
         # (for use in acceptance)
@@ -1292,10 +1306,6 @@ class MLDA(ArrayStepShared):
         # and convert dict -> numpy array
         q = self.bij.map(self.proposal_dist(q0_dict))
 
-        # Update error approximation mean and variance
-        #pm.set_data({'mu_B': np.array([9., 9.])})
-        #pm.set_data({'Sigma_B': np.array([[19., 0.], [0., 19.]])})
-
         # Evaluate MLDA acceptance log-ratio
         # If proposed sample from lower levels is the same as current one,
         # do not calculate likelihood, just set accept to 0.0
@@ -1310,6 +1320,16 @@ class MLDA(ArrayStepShared):
         q_new, accepted = metrop_select(accept, q, q0)
         if skipped_logp:
             accepted = False
+
+        if self.tune and self.adaptive_error_correction:
+            if accepted and not skipped_logp:
+                self.last_synced_output_diff = self.model.d.get_value() - self.next_model.d.get_value()
+                self.adaptation_started = True
+            if self.adaptation_started:
+                self.Sigma_B.update(self.last_synced_output_diff)
+                with self.next_model:
+                    pm.set_data({'mu_B': self.mu_B()})
+                    pm.set_data({'Sigma_B': self.Sigma_B()})
 
         # Update acceptance counter
         self.accepted += accepted
@@ -1376,5 +1396,17 @@ def delta_logp(logp, vars, shared):
     logp1 = pm.CallableTensor(logp0)(inarray1)
 
     f = theano.function([inarray1, inarray0], logp1 - logp0)
+    f.trust_input = False
+    return f
+
+def delta_logp_inverse(logp, vars, shared):
+    [logp0], inarray0 = pm.join_nonshared_inputs([logp], vars, shared)
+
+    tensor_type = inarray0.type
+    inarray1 = tensor_type('inarray1')
+
+    logp1 = pm.CallableTensor(logp0)(inarray1)
+
+    f = theano.function([inarray1, inarray0], - logp0 + logp1)
     f.trust_input = False
     return f

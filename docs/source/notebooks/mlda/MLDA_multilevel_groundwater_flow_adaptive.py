@@ -96,6 +96,7 @@ import theano.tensor as tt
 from itertools import product
 import matplotlib.pyplot as plt
 from Model import Model, model_wrapper, project_eigenpairs
+import sys
 os.environ['OPENBLAS_NUM_THREADS'] = '1'  # Set environmental variable
 
 
@@ -130,7 +131,7 @@ tune_interval = 100
 discard_tuning = True
 
 # Number of independent chains
-nchains = 2
+nchains = 1
 
 # Subsampling rate for MLDA
 nsub = 5
@@ -156,6 +157,7 @@ sampling_seed = 12345
 points_list = [0.1, 0.3, 0.5, 0.7, 0.9]
 
 
+
 # Use a Theano Op along with the code within ./mlda to construct the forward model
 class ForwardModel(tt.Op):
     """
@@ -172,7 +174,7 @@ class ForwardModel(tt.Op):
     itypes = [tt.dvector]  # expects a vector of parameter values (theta)
     otypes = [tt.dvector]  # outputs a vector of model outputs
 
-    def __init__(self, my_model, x):
+    def __init__(self, my_model, x, pymc3_model):
         """
         Initialise the Op with various things that our forward model function
         requires.
@@ -189,13 +191,17 @@ class ForwardModel(tt.Op):
         # add inputs as class attributes
         self.my_model = my_model
         self.x = x
+        self.pymc3_model = pymc3_model
 
     def perform(self, node, inputs, outputs):
         # the method that is used when calling the Op
         theta = inputs[0]  # this will contain my variables
 
         # call the forward model function
-        outputs[0][0] = model_wrapper(self.my_model, theta, self.x)
+        buffergreg = model_wrapper(self.my_model, theta, self.x)
+        with self.pymc3_model:
+            pm.set_data({'d': buffergreg})
+        outputs[0][0] = buffergreg
 
 
 # Instantiate Model objects and data
@@ -236,8 +242,8 @@ np.fill_diagonal(s, sigma**2)
 
 # create Theano Ops to wrap likelihoods of all model levels and store them in list
 mout = []
-for m in my_models:
-    mout.append(ForwardModel(m, datapoints))
+#for m in my_models:
+#    mout.append(ForwardModel(m, datapoints))
 
 
 # Construct pymc3 model objects for coarse models
@@ -252,6 +258,7 @@ for j in range(len(my_models) - 1):
         # Both are initialised with zeros.
         mu_B = pm.Data('mu_B', np.zeros(len(data)))
         Sigma_B = pm.Data('Sigma_B', np.zeros((len(data), len(data))))
+        d = pm.Data('d', np.zeros(len(data)))
 
         # Sigma_e is the covariance of the assumed error 'e' in the model.
         # This error is due to measurement noise/bias vs. the real world
@@ -267,6 +274,7 @@ for j in range(len(my_models) - 1):
 
         # this is a deterministic variable that captures the output of
         # the forward model every time it is run
+        mout.append(ForwardModel(my_models[j], datapoints, model))
         output = pm.Potential('output', mout[j](theta))
 
         # The distribution of the error 'e' (assumed error of the forward model)
@@ -274,7 +282,7 @@ for j in range(len(my_models) - 1):
         # - the mean is equal to the forward model output plus the bias correction term mu_B
         # - the covariance is equal to the forward model covariance Sigma_e plus the bias correction term Sigma_B
         # This creates the likelihood of the model given the observed data
-        pm.MvNormal('e', mu=output, cov=Sigma_e, observed=data)
+        pm.MvNormal('e', mu=output + mu_B, cov=Sigma_e + Sigma_B, observed=data)
 
     coarse_models.append(model)
 
@@ -290,12 +298,13 @@ ess = []
 ess_n = []
 performances = []
 
-with pm.Model():
+with pm.Model() as fine_model:
     # mu_B and Sigma_B are the mean and covariance of the random bias
     # between this forward model and the model one level below. The bias is due
     # Both are initialised with zeros.
-    mu_B = pm.Data('mu_B', np.zeros(len(data)))
-    Sigma_B = pm.Data('Sigma_B', np.zeros((len(data), len(data))))
+    #mu_B = pm.Data('mu_B', np.zeros(len(data)))
+    #Sigma_B = pm.Data('Sigma_B', np.zeros((len(data), len(data))))
+    d = pm.Data('d', np.zeros(len(data)))
 
     # Sigma_e is the covariance of the assumed error 'e' in the model.
     # This error is due to measurement noise/bias vs. the real world
@@ -311,6 +320,7 @@ with pm.Model():
 
     # this is a deterministic variable that captures the output of
     # the fine forward model every time it is run
+    mout.append(ForwardModel(my_models[-1], datapoints, fine_model))
     output = pm.Potential('output', mout[-1](theta))
 
     # The distribution of the error 'e' (assumed error of the forward model)
