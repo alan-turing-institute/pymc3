@@ -929,9 +929,12 @@ class MLDA(ArrayStepShared):
         multilevel models.
     mode :  string or `Mode` instance.
         Compilation mode passed to Theano functions
-    subsampling_rate : int
-        Number of samples generated in level l-1 to propose a sample
-        for level l.
+    subsampling_rates : integer or list of integers
+        One interger for all levels or a list with one number for each level
+        (excluding the finest level).
+        This is the number of samples generated in level l-1 to propose a sample
+        for level l for all l levels (excluding the finest level). The length of
+        the list needs to be the same as the length of coarse_models.
     base_blocked : bool
         To flag to choose whether base sampler (level=0) is a
         Compound Metropolis step (base_blocked=False)
@@ -952,7 +955,7 @@ class MLDA(ArrayStepShared):
         ...     x = Normal("x", mu=0, sigma=10)
         ...     y = Normal("y", mu=x, sigma=1, observed=datum)
         ...     step_method = pm.MLDA(coarse_models=[coarse_model]
-        ...                           subsampling_rate=5)
+        ...                           subsampling_rates=5)
         ...     trace = pm.sample(ndraws=500, chains=2,
         ...                       tune=100, step=step_method,
         ...                       random_seed=123)
@@ -989,7 +992,7 @@ class MLDA(ArrayStepShared):
 
     def __init__(self, coarse_models, vars=None, base_S=None, base_proposal_dist=None,
                  base_scaling=1., tune=True, base_tune_interval=100, model=None, mode=None,
-                 subsampling_rate=5, base_blocked=False, **kwargs):
+                 subsampling_rates=5, base_blocked=False, **kwargs):
 
         warnings.warn(
             'The MLDA implementation in PyMC3 is very young. '
@@ -1007,6 +1010,14 @@ class MLDA(ArrayStepShared):
             raise ValueError("MLDA step method was given an empty "
                              "list of coarse models. Give at least "
                              "one coarse model.")
+        if isinstance(subsampling_rates, int):
+            self.subsampling_rates = [subsampling_rates] * len(self.coarse_models)
+        else:
+            if len(subsampling_rates) != len(self.coarse_models):
+                raise ValueError(f"List of subsampling rates needs to have the same "
+                                 f"length as list of coarse models but the lengths "
+                                 f"were {len(subsampling_rates)}, {len(self.coarse_models)}")
+            self.subsampling_rates = subsampling_rates
         self.num_levels = len(self.coarse_models) + 1
         self.base_S = base_S
         self.base_proposal_dist = base_proposal_dist
@@ -1016,7 +1027,6 @@ class MLDA(ArrayStepShared):
         self.model = model
         self.next_model = self.coarse_models[-1]
         self.mode = mode
-        self.subsampling_rate = subsampling_rate
         self.base_blocked = base_blocked
         self.base_scaling_stats = None
 
@@ -1072,6 +1082,7 @@ class MLDA(ArrayStepShared):
         else:
             # drop the last coarse model
             next_coarse_models = self.coarse_models[:-1]
+            next_subsampling_rates = self.subsampling_rates[:-1]
             with self.next_model:
                 # make sure the correct variables are selected from next_model
                 vars_next = [var for var in self.next_model.vars
@@ -1083,7 +1094,7 @@ class MLDA(ArrayStepShared):
                                                 tune=self.tune,
                                                 base_tune_interval=self.base_tune_interval,
                                                 model=None, mode=self.mode,
-                                                subsampling_rate=self.subsampling_rate,
+                                                subsampling_rates=next_subsampling_rates,
                                                 coarse_models=next_coarse_models,
                                                 base_blocked=self.base_blocked,
                                                 **kwargs)
@@ -1095,7 +1106,7 @@ class MLDA(ArrayStepShared):
         self.proposal_dist = RecursiveDAProposal(self.next_step_method,
                                                  self.next_model,
                                                  self.tune,
-                                                 self.subsampling_rate)
+                                                 self.subsampling_rates[-1])
 
         # Update stats data types dictionary given vars and base_blocked
         if self.base_blocked or len(self.vars) == 1:
