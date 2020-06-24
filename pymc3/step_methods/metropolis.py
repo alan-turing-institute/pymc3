@@ -27,10 +27,10 @@ from pymc3.theanof import floatX
 
 import theano.tensor as tt
 
-__all__ = ['Metropolis', 'DEMetropolis', 'DEMetropolisZ', 'BinaryMetropolis', 'BinaryGibbsMetropolis',
+__all__ = ['Metropolis', 'DEMetropolis', 'DEMetropolisZ', 'MLDA', 'BinaryMetropolis', 'BinaryGibbsMetropolis',
            'CategoricalGibbsMetropolis', 'UniformProposal', 'NormalProposal', 'CauchyProposal',
            'LaplaceProposal', 'PoissonProposal', 'MultivariateNormalProposal',
-           'RecursiveDAProposal', 'MLDA']
+           'RecursiveDAProposal']
 
 
 # Available proposal distributions for Metropolis
@@ -227,7 +227,8 @@ class Metropolis(ArrayStepShared):
 
         shared = pm.make_shared_replacements(vars, model)
         self.delta_logp = delta_logp(model.logpt, vars, shared)
-        self.model = model
+        if self.is_mlda_base:
+            self.model = model
         super().__init__(vars, shared)
 
     def reset_tuning(self):
@@ -1323,7 +1324,7 @@ class MLDA(ArrayStepShared):
 
         if self.tune and self.adaptive_error_correction:
             if accepted and not skipped_logp:
-                self.last_synced_output_diff = self.model.d.get_value() - self.next_model.d.get_value()
+                self.last_synced_output_diff = self.model.model_output.get_value() - self.next_model.model_output.get_value()
                 self.adaptation_started = True
             if self.adaptation_started:
                 self.Sigma_B.update(self.last_synced_output_diff)
@@ -1398,6 +1399,7 @@ def delta_logp(logp, vars, shared):
     f = theano.function([inarray1, inarray0], logp1 - logp0)
     f.trust_input = False
     return f
+
 
 def delta_logp_inverse(logp, vars, shared):
     [logp0], inarray0 = pm.join_nonshared_inputs([logp], vars, shared)

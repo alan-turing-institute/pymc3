@@ -109,7 +109,7 @@ os.environ['OPENBLAS_NUM_THREADS'] = '1'  # Set environmental variable
 # points in each dimension. For example, here we set resolutions = 
 # [(30, 30), (120, 120)] which creates a coarse, cheap 30x30 model and 
 # a fine, expensive 120x120 model.
-resolutions = [(5, 5), (10, 10)]
+resolutions = [(20, 20), (50, 50)]
 
 # Set random field parameters
 field_mean = 0
@@ -117,13 +117,13 @@ field_stdev = 1
 lamb_cov = 0.1
 
 # Set the number of unknown parameters (i.e. dimension of theta in posterior)
-nparam = 1
+nparam = 2
 
 # Number of draws from the distribution
-ndraws = 500
+ndraws = 5000
 
 # Number of burn-in samples
-nburn = 100
+nburn = 1000
 
 # MLDA and Metropolis tuning parameters
 tune = True
@@ -131,7 +131,7 @@ tune_interval = 100
 discard_tuning = True
 
 # Number of independent chains
-nchains = 1
+nchains = 4
 
 # Subsampling rate for MLDA
 nsub = 5
@@ -198,10 +198,10 @@ class ForwardModel(tt.Op):
         theta = inputs[0]  # this will contain my variables
 
         # call the forward model function
-        buffergreg = model_wrapper(self.my_model, theta, self.x)
+        temp = model_wrapper(self.my_model, theta, self.x)
         with self.pymc3_model:
-            pm.set_data({'d': buffergreg})
-        outputs[0][0] = buffergreg
+            pm.set_data({'model_output': temp})
+        outputs[0][0] = temp
 
 
 # Instantiate Model objects and data
@@ -258,7 +258,7 @@ for j in range(len(my_models) - 1):
         # Both are initialised with zeros.
         mu_B = pm.Data('mu_B', np.zeros(len(data)))
         Sigma_B = pm.Data('Sigma_B', np.zeros((len(data), len(data))))
-        d = pm.Data('d', np.zeros(len(data)))
+        model_output = pm.Data('model_output', np.zeros(len(data)))
 
         # Sigma_e is the covariance of the assumed error 'e' in the model.
         # This error is due to measurement noise/bias vs. the real world
@@ -299,12 +299,9 @@ ess_n = []
 performances = []
 
 with pm.Model() as fine_model:
-    # mu_B and Sigma_B are the mean and covariance of the random bias
-    # between this forward model and the model one level below. The bias is due
-    # Both are initialised with zeros.
-    #mu_B = pm.Data('mu_B', np.zeros(len(data)))
-    #Sigma_B = pm.Data('Sigma_B', np.zeros((len(data), len(data))))
-    d = pm.Data('d', np.zeros(len(data)))
+    # model_output is the output of the forward model
+    # Initialised with zeros.
+    model_output = pm.Data('model_output', np.zeros(len(data)))
 
     # Sigma_e is the covariance of the assumed error 'e' in the model.
     # This error is due to measurement noise/bias vs. the real world
@@ -330,9 +327,12 @@ with pm.Model() as fine_model:
     # coarse models list
     # Also initialise a Metropolis step method object
     step_metropolis = pm.Metropolis(tune=tune, tune_interval=tune_interval, blocked=blocked)
-    step_mlda = pm.MLDA(subsampling_rate=nsub, coarse_models=coarse_models,
-                        tune=tune, tune_interval=tune_interval, base_blocked=blocked,
-                        adaptive_error_correction=aec)
+    step_mlda_without = pm.MLDA(subsampling_rate=nsub, coarse_models=coarse_models,
+                                tune=tune, tune_interval=tune_interval, base_blocked=blocked,
+                                adaptive_error_correction=False)
+    step_mlda_with = pm.MLDA(subsampling_rate=nsub, coarse_models=coarse_models,
+                             tune=tune, tune_interval=tune_interval, base_blocked=blocked,
+                             adaptive_error_correction=True)
 
     # Inference!
     # Metropolis
@@ -344,10 +344,19 @@ with pm.Model() as fine_model:
                             random_seed=sampling_seed))
     runtimes.append(time.time() - t_start)
     
-    # MLDA
+    # MLDA without adaptive error correction
     t_start = time.time()
-    method_names.append("MLDA")
-    traces.append(pm.sample(draws=ndraws, step=step_mlda,
+    method_names.append("MLDA_without_aec")
+    traces.append(pm.sample(draws=ndraws, step=step_mlda_without,
+                            chains=nchains, tune=nburn,
+                            discard_tuned_samples=discard_tuning,
+                            random_seed=sampling_seed))
+    runtimes.append(time.time() - t_start)
+
+    # MLDA with adaptive error correction
+    t_start = time.time()
+    method_names.append("MLDA_with_aec")
+    traces.append(pm.sample(draws=ndraws, step=step_mlda_with,
                             chains=nchains, tune=nburn,
                             discard_tuned_samples=discard_tuning,
                             random_seed=sampling_seed))
