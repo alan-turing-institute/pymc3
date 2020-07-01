@@ -1050,7 +1050,7 @@ class MLDA(ArrayStepShared):
             return self.mu
 
         def update(self, diff):
-            self.mu = 1 / (self.t + 1) * (self.t * self.mu + diff)
+            self.mu = (1 / (self.t + 1)) * (self.t * self.mu + diff)
             self.t += 1
 
     class EvolvingCovariance:
@@ -1268,6 +1268,7 @@ class MLDA(ArrayStepShared):
                                                 subsampling_rates=next_subsampling_rates,
                                                 coarse_models=next_coarse_models,
                                                 base_blocked=self.base_blocked,
+                                                adaptive_error_correction=self.adaptive_error_correction,
                                                 **kwargs)
 
         # instantiate the recursive DA proposal.
