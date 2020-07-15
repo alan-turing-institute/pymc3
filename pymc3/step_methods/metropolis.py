@@ -25,6 +25,8 @@ from .compound import CompoundStep
 import pymc3 as pm
 from pymc3.theanof import floatX
 
+import theano.tensor as tt
+
 __all__ = ['Metropolis', 'DEMetropolis', 'DEMetropolisZ', 'BinaryMetropolis', 'BinaryGibbsMetropolis',
            'CategoricalGibbsMetropolis', 'UniformProposal', 'NormalProposal', 'CauchyProposal',
            'LaplaceProposal', 'PoissonProposal', 'MultivariateNormalProposal',
@@ -999,10 +1001,11 @@ class MLDA(ArrayStepShared):
         Compound Metropolis step (base_blocked=False)
         or a blocked Metropolis step (base_blocked=True).
     variance_reduction: bool
-        Apply variance reduction to estimate a quantity of interest.
+        Store all the necessary quantities of interest and quantity differences
+        to enable computing a telescoping sum of the quantity of interest after
+        sampling.
     store_Q_fine: bool
-        Store the values of the quantity of interest from the fine chain. Only
-        applicable when variance_reduction=True.
+        Store the values of the quantity of interest from the fine chain.
 
     Examples
     ----------
@@ -1071,6 +1074,8 @@ class MLDA(ArrayStepShared):
 
         # assign internal state
         self.coarse_models = coarse_models
+        self.model = model
+        self.next_model = self.coarse_models[-1]
         if not isinstance(coarse_models, list):
             raise ValueError("MLDA step method cannot use "
                              "coarse_models if it is not a list")
@@ -1078,6 +1083,22 @@ class MLDA(ArrayStepShared):
             raise ValueError("MLDA step method was given an empty "
                              "list of coarse models. Give at least "
                              "one coarse model.")
+
+        self.variance_reduction = variance_reduction
+        self.store_Q_fine = store_Q_fine
+        if self.variance_reduction or self.store_Q_fine:
+            if not hasattr(self.model, 'Q'):
+                raise AttributeError("Model given to MLDA does not contain"
+                                     "variable 'Q'. You need to include"
+                                     "the variable in the model definition"
+                                     "for variance reduction to work or"
+                                     "for storing the fine Q."
+                                     "Use pm.Data() to define it.")
+            if not isinstance(self.model.Q, tt.sharedvar.TensorSharedVariable):
+                raise TypeError("The variable 'Q' in the model definition is not of type "
+                                "'TensorSharedVariable'. Use pm.Data() to define the"
+                                "variable.")
+
         if isinstance(subsampling_rates, int):
             self.subsampling_rates = [subsampling_rates] * len(self.coarse_models)
         else:
@@ -1112,17 +1133,12 @@ class MLDA(ArrayStepShared):
         self.base_tune_interval = base_tune_interval
         self.base_lamb = base_lamb
         self.base_tune_drop_fraction = float(base_tune_drop_fraction)
-        self.model = model
-        self.next_model = self.coarse_models[-1]
         self.mode = mode
         self.base_blocked = base_blocked
         self.base_scaling_stats = None
 
         if self.base_sampler == 'DEMetropolisZ':
             self.base_lambda_stats = None
-
-        self.variance_reduction = variance_reduction
-        self.store_Q_fine = store_Q_fine
 
         # Process model variables
         if vars is None:
@@ -1228,6 +1244,7 @@ class MLDA(ArrayStepShared):
                                                 coarse_models=next_coarse_models,
                                                 base_blocked=self.base_blocked,
                                                 variance_reduction=self.variance_reduction,
+                                                store_Q_fine=False,
                                                 **mlda_kwargs)
 
         # instantiate the recursive DA proposal.
@@ -1247,7 +1264,6 @@ class MLDA(ArrayStepShared):
         # initialise necessary variables for doing variance reduction
         if self.variance_reduction:
             self.sub_counter = 0
-            self.Q_last = np.nan
             self.Q_diff = []
             if self.is_child:
                 self.Q_reg = [np.nan] * self.subsampling_rate_above
@@ -1256,9 +1272,13 @@ class MLDA(ArrayStepShared):
             if not self.is_child:
                 for level in range(self.num_levels - 1, 0, -1):
                     self.stats_dtypes[0][f'Q_{level}_{level-1}'] = object
-                if self.store_Q_fine:
-                    self.stats_dtypes[0][f'Q_{self.num_levels - 1}'] = object
                 self.stats_dtypes[0]['Q_0'] = object
+
+        # initialise necessary variables for doing variance reduction or storing fine Q
+        if self.variance_reduction or self.store_Q_fine:
+            self.Q_last = np.nan
+        if self.store_Q_fine and not self.is_child:
+            self.stats_dtypes[0][f'Q_{self.num_levels - 1}'] = object
 
     def astep(self, q0):
         """One MLDA step, given current sample q0"""
@@ -1298,29 +1318,29 @@ class MLDA(ArrayStepShared):
         if skipped_logp:
             accepted = False
 
-        if self.variance_reduction:
+        if self.variance_reduction or self.store_Q_fine:
             if accepted and not skipped_logp:
                 self.Q_last = self.model.Q.get_value()
 
-            if not self.tune:
-                if self.is_child:
-                    if self.sub_counter == self.subsampling_rate_above:
-                        self.sub_counter = 0
-                    self.Q_reg[self.sub_counter] = self.Q_last
-                    self.sub_counter += 1
+        if self.variance_reduction:
+            if self.is_child:
+                if self.sub_counter == self.subsampling_rate_above:
+                    self.sub_counter = 0
+                self.Q_reg[self.sub_counter] = self.Q_last
+                self.sub_counter += 1
 
-                if self.num_levels == 2:
-                    if isinstance(self.next_step_method, CompoundStep):
-                        Q_base = self.extract_Q_base()
-                        self.Q_base_full.extend(Q_base)
-                    else:
-                        self.Q_base_full.extend(self.next_step_method.Q_reg)
-
-                r = np.random.randint(0, self.subsampling_rates[-1])
+            if self.num_levels == 2:
                 if isinstance(self.next_step_method, CompoundStep):
-                    self.Q_diff.append(self.Q_last - Q_base[r])
+                    Q_base = self.extract_Q_base()
+                    self.Q_base_full.extend(Q_base)
                 else:
-                    self.Q_diff.append(self.Q_last - self.next_step_method.Q_reg[r])
+                    self.Q_base_full.extend(self.next_step_method.Q_reg)
+
+            r = np.random.randint(0, self.subsampling_rates[-1])
+            if isinstance(self.next_step_method, CompoundStep):
+                self.Q_diff.append(self.Q_last - Q_base[r])
+            else:
+                self.Q_diff.append(self.Q_last - self.next_step_method.Q_reg[r])
 
         # Update acceptance counter
         self.accepted += accepted
@@ -1355,9 +1375,9 @@ class MLDA(ArrayStepShared):
         if self.base_sampler == "DEMetropolisZ":
             stats = {**stats, **self.base_lambda_stats}
 
-        if self.variance_reduction and not self.is_child:
+        if (self.variance_reduction or self.store_Q_fine) and not self.is_child:
             q_stats = {}
-            if not self.tune:
+            if self.variance_reduction:
                 m = self
                 for level in range(self.num_levels - 1, 0, -1):
                     q_stats[f'Q_{level}_{level - 1}'] = np.array(m.Q_diff)
@@ -1367,14 +1387,8 @@ class MLDA(ArrayStepShared):
                     m = m.next_step_method
                 q_stats['Q_0'] = np.array(m.Q_base_full)
                 m.Q_base_full = []
-                if self.store_Q_fine:
-                    q_stats['Q_' + str(self.num_levels - 1)] = np.array(self.Q_last)
-            else:
-                for level in range(self.num_levels - 1, 0, -1):
-                    q_stats[f'Q_{level}_{level - 1}'] = np.nan
-                    q_stats['Q_0'] = np.nan
-                    if self.store_Q_fine:
-                        q_stats['Q_' + str(self.num_levels - 1)] = np.nan
+            if self.store_Q_fine:
+                q_stats['Q_' + str(self.num_levels - 1)] = np.array(self.Q_last)
             stats = {**stats, **q_stats}
 
         return q_new, [stats]

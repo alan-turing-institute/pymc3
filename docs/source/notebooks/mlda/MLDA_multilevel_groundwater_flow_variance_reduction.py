@@ -70,14 +70,17 @@ points_list = [0.1, 0.3, 0.5, 0.7, 0.9]
 
 
 # Define a function that calculates the quantity of interest Q given the model
-# It needs to be applied after feeding the model with a theta a doing the solve
+# This can be any quantity dependent on the unknown variables theta.
 # In this case, the quantity of interest is the hydraulic head at some fixed point (x, y)=(0.5, 0.45)
+# It needs to run after solving model PDE
 def quantity_of_interest(my_model):
     """Quantity of interest function"""
     return my_model.solver.h(0.5, 0.45)
 
 
 # Use a Theano Op along with the code within ./mlda to construct the forward model
+# In order to use variance reduction, this Op needs to save the quantity of interest to
+# a model variable with the name Q
 class ForwardModel(tt.Op):
     """
     Theano Op that wraps the forward model computation,
@@ -115,12 +118,13 @@ class ForwardModel(tt.Op):
         # the method that is used when calling the Op
         theta = inputs[0]  # this will contain my variables
 
-        # call the forward model function
+        # call the forward model function - this solves the model PDE
         outputs[0][0] = model_wrapper(self.my_model, theta, self.x)
 
         # call the quantity of interest function after the model has been solved
         # with the provided theta
-        # save the result inside the pymc3 model variable Q
+        # save the result inside the pymc3 model variable 'Q'
+        # Note that the result needs to be saved to 'Q' in order to do variance reduction
         with self.pymc3_model:
             pm.set_data({"Q": quantity_of_interest(self.my_model)})
 
@@ -236,15 +240,23 @@ with pm.Model() as fine_model:
     # The distribution of the error 'e' (assumed error of the forward model)
     pm.MvNormal('e', mu=output, cov=Sigma_e, observed=data)
 
-    # Initialise an MLDA step method object, passing the subsampling rate and
-    # coarse models list - notice that we define variance reduction and also we
-    # set store_Q_fine to True. This will make sure the sampler store the
-    # quantities of interest at the fine level, to allow us to easily compare
-    # the accuracy of the Q calculation between using the first chain vs. using all chain
-    # differences
+    # Initialise two MLDA step method objects, one without variance reduction but with
+    # store_Q_fine set to True and the other with variance reduction.
+    step_mlda_without = pm.MLDA(subsampling_rates=nsub, coarse_models=coarse_models,
+                                tune=tune, tune_interval=tune_interval, base_blocked=blocked,
+                                store_Q_fine=True)
     step_mlda_with = pm.MLDA(subsampling_rates=nsub, coarse_models=coarse_models,
                              tune=tune, tune_interval=tune_interval, base_blocked=blocked,
-                             variance_reduction=vr, store_Q_fine=True)
+                             variance_reduction=vr)
+
+    # MLDA without variance reduction
+    t_start = time.time()
+    method_names.append("MLDA_without_vr")
+    traces.append(pm.sample(draws=ndraws, step=step_mlda_without,
+                            chains=nchains, tune=nburn,
+                            discard_tuned_samples=discard_tuning,
+                            random_seed=sampling_seed))
+    runtimes.append(time.time() - t_start)
 
     # MLDA with variance reduction
     t_start = time.time()
@@ -287,9 +299,9 @@ plt.show()
 # - Telescopic sum approach: Using Q values from the the coarsest chain (Q_0),
 #   plus all estimates of differences between levels (e.g. Q_1_0, Q_2_1, etc)
 Q_2 = traces[0].get_sampler_stats("Q_2").reshape((nchains, ndraws))
-Q_0 = np.concatenate(traces[0].get_sampler_stats("Q_0")).reshape((nchains, ndraws * nsub * nsub))
-Q_1_0 = np.concatenate(traces[0].get_sampler_stats("Q_1_0")).reshape((nchains, ndraws * nsub))
-Q_2_1 = np.concatenate(traces[0].get_sampler_stats("Q_2_1")).reshape((nchains, ndraws))
+Q_0 = np.concatenate(traces[1].get_sampler_stats("Q_0")).reshape((nchains, ndraws * nsub * nsub))
+Q_1_0 = np.concatenate(traces[1].get_sampler_stats("Q_1_0")).reshape((nchains, ndraws * nsub))
+Q_2_1 = np.concatenate(traces[1].get_sampler_stats("Q_2_1")).reshape((nchains, ndraws))
 Q_mean_standard = Q_2.mean(axis=1).mean()
 Q_var_standard = Q_2.mean(axis=1).var()
 Q_mean_vr = (Q_0.mean(axis=1) + Q_1_0.mean(axis=1) + Q_2_1.mean(axis=1)).mean()
