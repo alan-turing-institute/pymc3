@@ -1074,8 +1074,6 @@ class MLDA(ArrayStepShared):
 
         # assign internal state
         self.coarse_models = coarse_models
-        self.model = model
-        self.next_model = self.coarse_models[-1]
         if not isinstance(coarse_models, list):
             raise ValueError("MLDA step method cannot use "
                              "coarse_models if it is not a list")
@@ -1083,7 +1081,7 @@ class MLDA(ArrayStepShared):
             raise ValueError("MLDA step method was given an empty "
                              "list of coarse models. Give at least "
                              "one coarse model.")
-
+        self.model = model
         self.variance_reduction = variance_reduction
         self.store_Q_fine = store_Q_fine
         if self.variance_reduction or self.store_Q_fine:
@@ -1107,11 +1105,13 @@ class MLDA(ArrayStepShared):
                                  f"length as list of coarse models but the lengths "
                                  f"were {len(subsampling_rates)}, {len(self.coarse_models)}")
             self.subsampling_rates = subsampling_rates
+
         self.is_child = kwargs.get("is_child", False)
         if self.is_child:
             self.subsampling_rate_above = kwargs.get("subsampling_rate_above", None)
         self.num_levels = len(self.coarse_models) + 1
         self.base_sampler = base_sampler
+        self.next_model = self.coarse_models[-1]
         self.base_S = base_S
         self.base_proposal_dist = base_proposal_dist
 
