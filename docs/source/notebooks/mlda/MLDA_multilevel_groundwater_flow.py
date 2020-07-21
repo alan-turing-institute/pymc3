@@ -108,7 +108,7 @@ os.environ['OPENBLAS_NUM_THREADS'] = '1'  # Set environmental variable
 # points in each dimension. For example, here we set resolutions = 
 # [(30, 30), (120, 120)] which creates a coarse, cheap 30x30 model and 
 # a fine, expensive 120x120 model.
-resolutions = [(30, 30), (120, 120)]
+resolutions = [(30, 30), (80, 80)]
 
 # Set random field parameters
 field_mean = 0
@@ -308,7 +308,8 @@ with pm.Model():
     # Also initialise a Metropolis step method object
     step_metropolis = pm.Metropolis(tune=tune, tune_interval=tune_interval, blocked=blocked)
     step_mlda = pm.MLDA(subsampling_rates=nsub, coarse_models=coarse_models,
-                        tune=tune, tune_interval=tune_interval, base_blocked=blocked)
+                        base_tune_interval=tune_interval, base_sampler='DEMetropolisZ')
+    step_demetropolisz = pm.DEMetropolisZ(tune_interval=tune_interval)
 
     # Inference!
     # Metropolis
@@ -329,6 +330,16 @@ with pm.Model():
                             random_seed=sampling_seed))
     runtimes.append(time.time() - t_start)
 
+    # DEMetropolisZ
+    t_start = time.time()
+    method_names.append("DEMetropolisZ")
+    traces.append(pm.sample(draws=ndraws, step=step_demetropolisz,
+                            chains=nchains, tune=nburn,
+                            discard_tuned_samples=discard_tuning,
+                            random_seed=sampling_seed))
+    runtimes.append(time.time() - t_start)
+
+
 # Print performance metrics
 for i, trace in enumerate(traces):
     acc.append(trace.get_sampler_stats('accepted').mean())
@@ -343,7 +354,7 @@ for i, trace in enumerate(traces):
           f'\nNormalised ESS list: {ess_n[i]}'
           f'\nESS/sec: {performances[i]}')
 
-print(f"\nMLDA vs. Metropolis performance speedup in all dimensions (performance measured by ES/sec):\n{np.array(performances[1]) / np.array(performances[0])}")
+print(f"\nMLDA vs. DEMetropolisZ performance speedup in all dimensions (performance measured by ES/sec):\n{np.array(performances[1]) / np.array(performances[2])}")
 
 # Show stats summary
 
