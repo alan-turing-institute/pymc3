@@ -796,16 +796,22 @@ class DEMetropolisZ(ArrayStepShared):
 
         self.mode = mode
 
+        # flag to indicate this stepper was instantiated within an MLDA stepper
+        # if not, tuning parameters are reset when _iter_sample() is called
+        self.is_mlda_base = kwargs.pop("is_mlda_base", False)
+
         shared = pm.make_shared_replacements(vars, model)
         self.delta_logp = delta_logp(model.logpt, vars, shared)
         super().__init__(vars, shared)
 
     def reset_tuning(self):
-        """Resets the tuned sampler parameters and history to their initial values."""
-        # history can't be reset via the _untuned_settings dict because it's a list
-        self._history = []
-        for attr, initial_value in self._untuned_settings.items():
-            setattr(self, attr, initial_value)
+        """Resets the tuned sampler parameters and history to their initial values.
+        Skipped if stepper is a bottom-level stepper in MLDA."""
+        if not self.is_mlda_base:
+            # history can't be reset via the _untuned_settings dict because it's a list
+            self._history = []
+            for attr, initial_value in self._untuned_settings.items():
+                setattr(self, attr, initial_value)
         return
 
     def astep(self, q0):
@@ -883,9 +889,10 @@ class MLDA(ArrayStepShared):
 
     Each chain runs for a fixed number of iterations (subsampling_rate) and then
     the last sample generated is used as a proposal for the chain in the level
-    above. The bottom-level chain is a Metropolis sampler. The algorithm achieves
-    much higher acceptance rate and effective sample sizes than other samplers
-    if the coarse models are sufficiently good approximations of the fine one.
+    above. The bottom-level chain is a Metropolis or DEMetropolisZ sampler.
+    The algorithm achieves higher acceptance rate and effective sample sizes
+    than other samplers if the coarse models are sufficiently good approximations
+    of the fine one.
 
     Parameters
     ----------
@@ -904,15 +911,27 @@ class MLDA(ArrayStepShared):
         S (and n). Defaults to normal. This is the proposal used in the
         coarsest (base) chain, i.e. level=0.
     base_scaling : scalar or array
-        Initial scale factor for base proposal. Defaults to 1.
+        Initial scale factor for base proposal. Defaults to 1. if base_sampler
+        is 'Metropolis' and to 0.001 if base_sampler is 'DEMetropolisZ'.
     tune : bool
-        Flag for tuning for the base proposal. Defaults to True. Note that
-        this is overidden by the tune parameter in sample(), i.e. when calling
+        Flag for tuning in the base proposal. If base_sampler is 'Metropolis' it
+        should be either True or False and defaults to True. Note that
+        this is overidden by the tune parameter in sample(). For example when calling
         step=MLDA(tune=False, ...) and then sample(step=step, tune=200, ...),
-        tuning will be activated for the first 200 steps.
+        tuning will be activated for the first 200 steps. If base_sampler is
+        'DEMetropolisZ', it should be 'lambda, ''scaling' or None and it defaults
+        to 'lambda'.
     base_tune_interval : int
         The frequency of tuning for the base proposal. Defaults to 100
         iterations.
+    lamb : float
+        Lambda parameter of the base level DE proposal mechanism. Only applicable when
+        base_sampler is 'DEMetropolisZ'. Defaults to 2.38 / sqrt(2 * ndim)
+    tune_drop_fraction: float
+        Fraction of tuning steps that will be removed from the base level samplers
+        history when the tuning ends. Only applicable when base_sampler is
+        'DEMetropolisZ'. Defaults to 0.9 - keeping the last 10% of tuning steps
+        for good mixing while removing 90% of potentially unconverged tuning positions.
     model : PyMC Model
         Optional model for sampling step. Defaults to None
         (taken from context). This model should be the finest of all
@@ -929,14 +948,6 @@ class MLDA(ArrayStepShared):
         To flag to choose whether base sampler (level=0) is a
         Compound Metropolis step (base_blocked=False)
         or a blocked Metropolis step (base_blocked=True).
-    lamb : float
-        Lambda parameter of the base level DE proposal mechanism. Only applicable when
-        base_sampler is 'DEMetropolisZ'. Defaults to 2.38 / sqrt(2 * ndim)
-    tune_drop_fraction: float
-        Fraction of tuning steps that will be removed from the base level samplers
-        history when the tuning ends. Only applicable when base_sampler is
-        'DEMetropolisZ'. Defaults to 0.9 - keeping the last 10% of tuning steps
-        for good mixing while removing 90% of potentially unconverged tuning positions.
 
     Examples
     ----------
@@ -989,9 +1000,11 @@ class MLDA(ArrayStepShared):
         'base_scaling': object
     }]
 
-    def __init__(self, coarse_models, vars=None, base_sampler='Metropolis', base_S=None, base_proposal_dist=None,
-                 base_scaling=1., tune=True, base_tune_interval=100, model=None, mode=None,
-                 subsampling_rates=5, base_blocked=False, **kwargs):
+    def __init__(self, coarse_models, vars=None, base_sampler='Metropolis', base_S=None,
+                 base_proposal_dist=None, base_scaling=None, tune={},
+                 base_tune_interval=100, lamb=None, tune_drop_fraction=0.9,
+                 model=None, mode=None, subsampling_rates=5, base_blocked=False,
+                 **kwargs):
 
         warnings.warn(
             'The MLDA implementation in PyMC3 is very young. '
@@ -1021,8 +1034,22 @@ class MLDA(ArrayStepShared):
         self.base_sampler = base_sampler
         self.base_S = base_S
         self.base_proposal_dist = base_proposal_dist
-        self.base_scaling = base_scaling
-        self.tune = tune
+
+        if self.base_scaling is None:
+            if self.base_sampler == 'Metropolis':
+                self.base_scaling = 1.
+            else:
+                self.base_scaling = 0.001
+        else:
+            self.base_scaling = base_scaling
+
+        if tune is self.__init__.__defaults__[0]:
+            if self.base_sampler == 'Metropolis':
+                self.tune = True
+            else:
+                self.tune = 'lambda'
+        else:
+            self.tune = tune
         if self.base_sampler == 'Metropolis':
             if self.tune not in [True, False]:
                 raise ValueError(f"The argument tune was set to {self.tune} while using"
@@ -1033,7 +1060,10 @@ class MLDA(ArrayStepShared):
                 raise ValueError(f"The argument tune was set to {self.tune} while using"
                                  f"a 'DEMetropolisZ' base sampler. 'DEMetropolisZ' tune needs to"
                                  f"be 'lambda', 'scaling' or None.")
+
         self.base_tune_interval = base_tune_interval
+        self.lamb = lamb
+        self.tune_drop_fraction = tune_drop_fraction
         self.model = model
         self.next_model = self.coarse_models[-1]
         self.mode = mode
@@ -1094,8 +1124,9 @@ class MLDA(ArrayStepShared):
                 else:
                     # DEMetropolisZ sampler in base level (level=0), targeting self.next_model
                     self.next_step_method = pm.DEMetropolisZ(vars=vars_next,
-                                                             proposal_dist=self.base_proposal_dist,
                                                              S=self.base_S,
+                                                             proposal_dist=self.base_proposal_dist,
+                                                             lamb=self.lamb,
                                                              scaling=self.base_scaling,
                                                              tune=self.tune,
                                                              tune_interval=self.base_tune_interval,
@@ -1103,7 +1134,6 @@ class MLDA(ArrayStepShared):
                                                              model=None,
                                                              mode=self.mode,
                                                              **{"is_mlda_base": True})
-
         else:
             # drop the last coarse model
             next_coarse_models = self.coarse_models[:-1]
@@ -1114,10 +1144,13 @@ class MLDA(ArrayStepShared):
                              if var.name in self.var_names]
                 # MLDA sampler in some intermediate level, targeting self.next_model
                 self.next_step_method = pm.MLDA(vars=vars_next, base_S=self.base_S,
+                                                base_sampler=self.base_sampler,
                                                 base_proposal_dist=self.base_proposal_dist,
                                                 base_scaling=self.base_scaling,
                                                 tune=self.tune,
                                                 base_tune_interval=self.base_tune_interval,
+                                                lamb=self.lamb,
+                                                tune_drop_fraction=self.tune_drop_fraction,
                                                 model=None, mode=self.mode,
                                                 subsampling_rates=next_subsampling_rates,
                                                 coarse_models=next_coarse_models,
@@ -1127,7 +1160,8 @@ class MLDA(ArrayStepShared):
         # instantiate the recursive DA proposal.
         # this is the main proposal used for
         # all levels (Recursive Delayed Acceptance)
-        # (except for level 0 where the step method is Metropolis and not MLDA)
+        # (except for level 0 where the step method is
+        # Metropolis/DEMetropolisZ and not MLDA)
         self.proposal_dist = RecursiveDAProposal(self.next_step_method,
                                                  self.next_model,
                                                  self.tune,
