@@ -929,6 +929,14 @@ class MLDA(ArrayStepShared):
         To flag to choose whether base sampler (level=0) is a
         Compound Metropolis step (base_blocked=False)
         or a blocked Metropolis step (base_blocked=True).
+    lamb : float
+        Lambda parameter of the base level DE proposal mechanism. Only applicable when
+        base_sampler is 'DEMetropolisZ'. Defaults to 2.38 / sqrt(2 * ndim)
+    tune_drop_fraction: float
+        Fraction of tuning steps that will be removed from the base level samplers
+        history when the tuning ends. Only applicable when base_sampler is
+        'DEMetropolisZ'. Defaults to 0.9 - keeping the last 10% of tuning steps
+        for good mixing while removing 90% of potentially unconverged tuning positions.
 
     Examples
     ----------
@@ -981,7 +989,7 @@ class MLDA(ArrayStepShared):
         'base_scaling': object
     }]
 
-    def __init__(self, coarse_models, vars=None, base_S=None, base_proposal_dist=None,
+    def __init__(self, coarse_models, vars=None, base_sampler='Metropolis', base_S=None, base_proposal_dist=None,
                  base_scaling=1., tune=True, base_tune_interval=100, model=None, mode=None,
                  subsampling_rates=5, base_blocked=False, **kwargs):
 
@@ -1010,10 +1018,21 @@ class MLDA(ArrayStepShared):
                                  f"were {len(subsampling_rates)}, {len(self.coarse_models)}")
             self.subsampling_rates = subsampling_rates
         self.num_levels = len(self.coarse_models) + 1
+        self.base_sampler = base_sampler
         self.base_S = base_S
         self.base_proposal_dist = base_proposal_dist
         self.base_scaling = base_scaling
         self.tune = tune
+        if self.base_sampler == 'Metropolis':
+            if self.tune not in [True, False]:
+                raise ValueError(f"The argument tune was set to {self.tune} while using"
+                                 f"a 'Metropolis' base sampler. 'Metropolis' tune needs to"
+                                 f"be either True or False.")
+        else:
+            if self.tune not in ['lambda', 'scaling', None]:
+                raise ValueError(f"The argument tune was set to {self.tune} while using"
+                                 f"a 'DEMetropolisZ' base sampler. 'DEMetropolisZ' tune needs to"
+                                 f"be 'lambda', 'scaling' or None.")
         self.base_tune_interval = base_tune_interval
         self.model = model
         self.next_model = self.coarse_models[-1]
@@ -1057,19 +1076,34 @@ class MLDA(ArrayStepShared):
                 # make sure the correct variables are selected from next_model
                 vars_next = [var for var in self.next_model.vars
                              if var.name in self.var_names]
-                # Metropolis sampler in base level (level=0), targeting self.next_model
-                # is_mlda_base is set to True to prevent tuning reset
-                # between MLDA iterations - note that Metropolis is used
-                # with only one chain and therefore the scaling reset issue
-                # (see issue #3733 in GitHub) will not appear here
-                self.next_step_method = pm.Metropolis(vars=vars_next,
-                                                      proposal_dist=self.base_proposal_dist,
-                                                      S=self.base_S,
-                                                      scaling=self.base_scaling, tune=self.tune,
-                                                      tune_interval=self.base_tune_interval,
-                                                      model=None,
-                                                      blocked=self.base_blocked,
-                                                      **{"is_mlda_base": True})
+                if self.base_sampler == 'Metropolis':
+                    # Metropolis sampler in base level (level=0), targeting self.next_model
+                    # The flag is_mlda_base is set to True to prevent tuning reset
+                    # between MLDA iterations - note that Metropolis is used
+                    # with only one chain and therefore the scaling reset issue
+                    # (see issue #3733 in GitHub) will not appear here
+                    self.next_step_method = pm.Metropolis(vars=vars_next,
+                                                          proposal_dist=self.base_proposal_dist,
+                                                          S=self.base_S,
+                                                          scaling=self.base_scaling, tune=self.tune,
+                                                          tune_interval=self.base_tune_interval,
+                                                          model=None,
+                                                          mode=self.mode,
+                                                          blocked=self.base_blocked,
+                                                          **{"is_mlda_base": True})
+                else:
+                    # DEMetropolisZ sampler in base level (level=0), targeting self.next_model
+                    self.next_step_method = pm.DEMetropolisZ(vars=vars_next,
+                                                             proposal_dist=self.base_proposal_dist,
+                                                             S=self.base_S,
+                                                             scaling=self.base_scaling,
+                                                             tune=self.tune,
+                                                             tune_interval=self.base_tune_interval,
+                                                             tune_drop_fraction=self.tune_drop_fraction,
+                                                             model=None,
+                                                             mode=self.mode,
+                                                             **{"is_mlda_base": True})
+
         else:
             # drop the last coarse model
             next_coarse_models = self.coarse_models[:-1]
