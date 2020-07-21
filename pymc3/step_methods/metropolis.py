@@ -205,6 +205,7 @@ class Metropolis(ArrayStepShared):
         self.tune_interval = tune_interval
         self.steps_until_tune = tune_interval
         self.accepted = 0
+        self.acc_tune = 0
 
         # Determine type of variables
         self.discrete = np.concatenate(
@@ -227,6 +228,8 @@ class Metropolis(ArrayStepShared):
 
         shared = pm.make_shared_replacements(vars, model)
         self.delta_logp = delta_logp(model.logpt, vars, shared)
+        self.delta_logp_1 = delta_logp_1(model.logpt, vars, shared)
+        self.delta_logp_0 = delta_logp_0(model.logpt, vars, shared)
         if self.is_mlda_base:
             self.model = model
         super().__init__(vars, shared)
@@ -266,6 +269,8 @@ class Metropolis(ArrayStepShared):
 
         q_new, accepted = metrop_select(accept, q, q0)
         self.accepted += accepted
+        if self.tune:
+            self.acc_tune += accepted
 
         self.steps_until_tune -= 1
 
@@ -1181,6 +1186,8 @@ class MLDA(ArrayStepShared):
         self.base_scaling_stats = None
         if self.base_sampler == 'DEMetropolisZ':
             self.base_lambda_stats = None
+        if self.adaptive_error_correction:
+            self.adaptive_stats = None
 
         # Process model variables
         if vars is None:
@@ -1285,6 +1292,11 @@ class MLDA(ArrayStepShared):
         if self.base_sampler == 'DEMetropolisZ':
             self.stats_dtypes[0]['base_lambda'] = np.float64
 
+        if self.adaptive_error_correction:
+            self.stats_dtypes[0]['mu_B'] = np.float64
+
+        self.skip_counter = 0
+
     def astep(self, q0):
         """One MLDA step, given current sample q0"""
         # Check if the tuning flag has been changed and, if yes,
@@ -1311,10 +1323,21 @@ class MLDA(ArrayStepShared):
         # Evaluate MLDA acceptance log-ratio
         # If proposed sample from lower levels is the same as current one,
         # do not calculate likelihood, just set accept to 0.0
+
+        a = self.num_levels
+        #if a == 3:
+            #print(self.num_levels)
         if (q == q0).all():
             accept = np.float(0.0)
             skipped_logp = True
+            self.skip_counter += 1
         else:
+            if self.num_levels == 2:
+                self.model.mu_B.set_value(np.zeros((200,)))
+                self.model.Sigma_B.set_value(np.zeros((200,200)))
+            else:
+                self.next_model.mu_B.set_value(self.mu_B())
+                self.next_model.Sigma_B.set_value(self.Sigma_B())
             accept = self.delta_logp(q, q0) + self.delta_logp_next(q0, q)
             skipped_logp = False
 
@@ -1366,6 +1389,10 @@ class MLDA(ArrayStepShared):
         if self.base_sampler == "DEMetropolisZ":
             stats = {**stats, **self.base_lambda_stats}
 
+        if self.adaptive_error_correction:
+            self.adaptive_stats = {'mu_B': self.next_model.mu_B.get_value()[0]}
+            stats = {**stats, **self.adaptive_stats}
+
         return q_new, [stats]
 
     @staticmethod
@@ -1411,5 +1438,29 @@ def delta_logp_inverse(logp, vars, shared):
     logp1 = pm.CallableTensor(logp0)(inarray1)
 
     f = theano.function([inarray1, inarray0], - logp0 + logp1)
+    f.trust_input = True
+    return f
+
+def delta_logp_1(logp, vars, shared):
+    [logp0], inarray0 = pm.join_nonshared_inputs([logp], vars, shared)
+
+    tensor_type = inarray0.type
+    inarray1 = tensor_type('inarray1')
+
+    logp1 = pm.CallableTensor(logp0)(inarray1)
+
+    f = theano.function([inarray1], logp1)
+    f.trust_input = True
+    return f
+
+def delta_logp_0(logp, vars, shared):
+    [logp0], inarray0 = pm.join_nonshared_inputs([logp], vars, shared)
+
+    tensor_type = inarray0.type
+    inarray1 = tensor_type('inarray1')
+
+    logp1 = pm.CallableTensor(logp0)(inarray1)
+
+    f = theano.function([inarray0], logp0)
     f.trust_input = True
     return f

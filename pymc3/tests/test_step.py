@@ -29,7 +29,7 @@ from .models import (
 from pymc3.sampling import assign_step_methods, sample
 from pymc3.parallel_sampling import ParallelSamplingError
 from pymc3.exceptions import SamplingError
-from pymc3.model import Model
+from pymc3.model import Model, Potential, set_data
 from pymc3.step_methods import (
     NUTS,
     BinaryGibbsMetropolis,
@@ -48,7 +48,8 @@ from pymc3.step_methods import (
     MLDA
 )
 from pymc3.theanof import floatX
-from pymc3.distributions import Binomial, Normal, Bernoulli, Categorical, Beta, HalfNormal
+from pymc3.distributions import Binomial, Normal, Bernoulli, Categorical, Beta, HalfNormal, MvNormal, DensityDist
+from pymc3.data import Data
 
 from numpy.testing import assert_array_almost_equal
 import numpy as np
@@ -1388,7 +1389,7 @@ class TestMLDA:
         assert MLDA.competence(pmodel[variable], has_grad=has_grad) == outcome
 
     def test_multiple_subsampling_rates(self):
-        """Test that when you give a signle integer it is applied to all levels and
+        """Test that when you give a single integer it is applied to all levels and
         when you give a list the list is applied correctly."""
         with Model() as coarse_model_0:
             Normal('n', 0, 2.2, shape=(3,))
@@ -1408,3 +1409,159 @@ class TestMLDA:
             with pytest.raises(ValueError):
                 step_3 = MLDA(coarse_models=[coarse_model_0, coarse_model_1], subsampling_rates=[3, 4, 10])
 
+    def test_aec_mu_sigma(self):
+        """Test that aec changes mu_B and Sigma_B in the coarse models"""
+        size = 100
+        true_intercept = 1
+        true_slope = 2
+        sigma = 0.1
+
+        x = np.linspace(0, 1, size)
+        # y = a + b*x
+        true_regression_line = true_intercept + true_slope * x
+        # add noise
+        y = true_regression_line + np.random.normal(0, sigma**2, size)
+
+        #data = dict(x=x, y=y)
+        s = np.identity(y.shape[0])
+        np.fill_diagonal(s, sigma ** 2)
+
+        def my_loglik(output, data, sigma, m, s):
+            """
+            This returns the log-likelihood of my_model given theta,
+            datapoints, the observed data and sigma. It uses the
+            model_wrapper function to do a model solve.
+            """
+            return - (0.5 / sigma ** 2) * np.sum((output + m - data) ** 2)
+
+        def my_loglik_fine(output, data, sigma):
+            """
+            This returns the log-likelihood of my_model given theta,
+            datapoints, the observed data and sigma. It uses the
+            model_wrapper function to do a model solve.
+            """
+            return - (0.5 / sigma ** 2) * np.sum((output - data) ** 2)
+
+        class ForwardModelLik(tt.Op):
+            itypes = [tt.dvector]
+            otypes = [tt.dvector]
+
+            def __init__(self, x, pymc3_model, data, sigma):
+
+                self.x = x
+                self.pymc3_model = pymc3_model
+                self.data = data
+                self.sigma = sigma
+
+            def perform(self, node, inputs, outputs):
+                intercept = inputs[0][0]
+                x_coeff = inputs[0][1]
+
+                temp = intercept + x_coeff * x
+                with self.pymc3_model:
+                    set_data({'model_output': temp})
+                    m = mu_B.get_value()
+                    s = Sigma_B.get_value()
+                outputs[0][0] = my_loglik(temp, self.data, self.sigma, m, s)
+
+        class ForwardModelLik_Fine(tt.Op):
+            itypes = [tt.dvector]
+            otypes = [tt.dvector]
+
+            def __init__(self, x, pymc3_model, data, sigma):
+
+                self.x = x
+                self.pymc3_model = pymc3_model
+                self.data = data
+                self.sigma = sigma
+
+            def perform(self, node, inputs, outputs):
+                intercept = inputs[0][0]
+                x_coeff = inputs[0][1]
+
+                temp = intercept + x_coeff * x
+                with self.pymc3_model:
+                    set_data({'model_output': temp})
+                outputs[0][0] = my_loglik_fine(temp, self.data, self.sigma)
+
+
+        mout = []
+
+        with Model() as coarse_model_0:
+            mu_B = Data('mu_B', np.zeros(y.shape))
+            Sigma_B = Data('Sigma_B', np.zeros((y.shape[0], y.shape[0])))
+            model_output = Data('model_output', np.zeros(y.shape))
+            Sigma_e = Data('Sigma_e', s)
+
+            # Define priors
+            #sigma = HalfCauchy('sigma', beta=10, testval=1.)
+            intercept = Normal('Intercept', 0, sigma=20)
+            x_coeff = Normal('x', 0, sigma=20)
+
+            theta = tt.as_tensor_variable([intercept, x_coeff])
+
+            mout.append(ForwardModelLik(x, coarse_model_0, y, sigma))
+
+            #output = Potential('output', mout[0](theta))
+
+            # use a DensityDist (use a lamdba function to "call" the Op)
+            temp = mout[0]
+            DensityDist('likelihood', lambda v, ll=temp: ll(v), observed={'v': theta})
+
+            # Define likelihood
+            #likelihood = Normal('y', mu=output + mu_B,
+            #                    sigma=Sigma_e + Sigma_B, observed=y)
+
+        with Model() as coarse_model_1:
+            mu_B = Data('mu_B', np.zeros(y.shape))
+            Sigma_B = Data('Sigma_B', np.zeros((y.shape[0], y.shape[0])))
+            model_output = Data('model_output', np.zeros(y.shape))
+            Sigma_e = Data('Sigma_e', s)
+
+            # Define priors
+            # sigma = HalfCauchy('sigma', beta=10, testval=1.)
+            intercept = Normal('Intercept', 0, sigma=20)
+            x_coeff = Normal('x', 0, sigma=20)
+
+            theta = tt.as_tensor_variable([intercept, x_coeff])
+
+            mout.append(ForwardModelLik(x, coarse_model_1, y, sigma))
+
+            # output = Potential('output', mout[0](theta))
+
+            # use a DensityDist (use a lamdba function to "call" the Op)
+            temp = mout[1]
+            DensityDist('likelihood', lambda v, ll=temp: ll(v), observed={'v': theta})
+
+        with Model() as model:
+            model_output = Data('model_output', np.zeros(y.shape))
+            Sigma_e = Data('Sigma_e', s)
+
+            # Define priors
+            # sigma = HalfCauchy('sigma', beta=10, testval=1.)
+            intercept = Normal('Intercept', 0, sigma=20)
+            x_coeff = Normal('x', 0, sigma=20)
+
+            theta = tt.as_tensor_variable([intercept, x_coeff])
+
+            mout.append(ForwardModelLik(x, model, y, sigma))
+
+            # output = Potential('output', mout[0](theta))
+
+            # use a DensityDist (use a lamdba function to "call" the Op)
+            temp = mout[-1]
+            DensityDist('likelihood', lambda v, ll=temp: ll(v), observed={'v': theta})
+
+            step_mlda = MLDA(coarse_models=[coarse_model_0, coarse_model_1],
+                             adaptive_error_correction=True)
+
+            trace = sample(draws=2000, step=step_mlda,
+                           chains=2, tune=1000)
+
+            print(trace.get_sampler_stats('accepted').mean())
+            from pymc3.stats import summary
+            from pymc3.plots import traceplot
+            import matplotlib.pyplot as plt
+            print(summary(trace))
+            traceplot(trace)
+            plt.show()
