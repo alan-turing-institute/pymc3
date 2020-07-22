@@ -26,6 +26,10 @@ class SquaredExponential:
         self.mkl = mkl
         self.lamb = lamb
         
+        self.assemble_covariance_matrix()
+        
+    def assemble_covariance_matrix(self):
+        
         # Create a snazzy distance-matrix for rapid
         # computation of the covariance matrix.
         dist = distance_matrix(self.coords,
@@ -98,3 +102,16 @@ class SquaredExponential:
                         cmap='plasma')
         plt.colorbar()
         plt.show()
+
+class Matern52(SquaredExponential):
+    def assemble_covariance_matrix(self):
+        
+        '''
+        This class inherits from RandomProcess and creates a Matern 5/2 covariance matrix.
+        '''
+        
+        # Compute scaled distances.
+        dist = np.sqrt(5)*distance_matrix(self.coords, self.coords)/self.lamb
+        
+        # Set up Matern 5/2 covariance matrix.
+        self.cov =  (1 + dist + dist**2/3) * np.exp(-dist)
