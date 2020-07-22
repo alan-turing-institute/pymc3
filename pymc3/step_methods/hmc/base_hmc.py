@@ -13,6 +13,7 @@
 #   limitations under the License.
 
 from collections import namedtuple
+import time
 
 import numpy as np
 import logging
@@ -28,10 +29,16 @@ from pymc3.exceptions import SamplingError
 
 logger = logging.getLogger("pymc3")
 
-HMCStepData = namedtuple("HMCStepData", "end, accept_stat, divergence_info, stats")
+HMCStepData = namedtuple(
+    "HMCStepData",
+    "end, accept_stat, divergence_info, stats"
+)
 
+DivergenceInfo = namedtuple(
+    "DivergenceInfo",
+    "message, exec_info, state, state_div"
+)
 
-DivergenceInfo = namedtuple("DivergenceInfo", "message, exec_info, state")
 
 class BaseHMC(arraystep.GradientSharedStep):
     """Superclass to implement Hamiltonian/hybrid monte carlo."""
@@ -132,6 +139,9 @@ class BaseHMC(arraystep.GradientSharedStep):
 
     def astep(self, q0):
         """Perform a single HMC iteration."""
+        perf_start = time.perf_counter()
+        process_start = time.process_time()
+
         p0 = self.potential.random()
         start = self.integrator.compute_state(q0, p0)
 
@@ -144,15 +154,14 @@ class BaseHMC(arraystep.GradientSharedStep):
             self.potential.raise_ok(self._logp_dlogp_func._ordering.vmap)
             message_energy = (
                 "Bad initial energy, check any log probabilities that "
-                "are inf or -inf, nan or very small:\n{}".format(error_logp.to_string())
+                "are inf or -inf, nan or very small:\n{}"
+                .format(error_logp.to_string())
             )
             warning = SamplerWarning(
                 WarningType.BAD_ENERGY,
                 message_energy,
                 "critical",
                 self.iter_count,
-                None,
-                None,
             )
             self._warnings.append(warning)
             raise SamplingError("Bad initial energy")
@@ -166,23 +175,39 @@ class BaseHMC(arraystep.GradientSharedStep):
 
         hmc_step = self._hamiltonian_step(start, p0, step_size)
 
+        perf_end = time.perf_counter()
+        process_end = time.process_time()
+
         self.step_adapt.update(hmc_step.accept_stat, adapt_step)
         self.potential.update(hmc_step.end.q, hmc_step.end.q_grad, self.tune)
         if hmc_step.divergence_info:
             info = hmc_step.divergence_info
+            point = None
+            point_dest = None
+            info_store = None
             if self.tune:
                 kind = WarningType.TUNING_DIVERGENCE
-                point = None
             else:
                 kind = WarningType.DIVERGENCE
                 self._num_divs_sample += 1
                 # We don't want to fill up all memory with divergence info
-                if self._num_divs_sample < 100:
+                if self._num_divs_sample < 100 and info.state is not None:
                     point = self._logp_dlogp_func.array_to_dict(info.state.q)
-                else:
-                    point = None
+                if self._num_divs_sample < 100 and info.state_div is not None:
+                    point_dest = self._logp_dlogp_func.array_to_dict(
+                        info.state_div.q
+                    )
+                if self._num_divs_sample < 100:
+                    info_store = info
             warning = SamplerWarning(
-                kind, info.message, "debug", self.iter_count, info.exec_info, point
+                kind,
+                info.message,
+                "debug",
+                self.iter_count,
+                info.exec_info,
+                divergence_point_source=point,
+                divergence_point_dest=point_dest,
+                divergence_info=info_store,
             )
 
             self._warnings.append(warning)
@@ -191,7 +216,13 @@ class BaseHMC(arraystep.GradientSharedStep):
         if not self.tune:
             self._samples_after_tune += 1
 
-        stats = {"tune": self.tune, "diverging": bool(hmc_step.divergence_info)}
+        stats = {
+            "tune": self.tune,
+            "diverging": bool(hmc_step.divergence_info),
+            "perf_counter_diff": perf_end - perf_start,
+            "process_time_diff": process_end - process_start,
+            "perf_counter_start": perf_start,
+        }
 
         stats.update(hmc_step.stats)
         stats.update(self.step_adapt.stats())
@@ -230,9 +261,7 @@ class BaseHMC(arraystep.GradientSharedStep):
             )
 
         if message:
-            warning = SamplerWarning(
-                WarningType.DIVERGENCES, message, "error", None, None, None
-            )
+            warning = SamplerWarning(WarningType.DIVERGENCES, message, "error")
             warnings.append(warning)
 
         warnings.extend(self.step_adapt.warnings())
