@@ -22,6 +22,7 @@ from .metropolis import BinaryMetropolis
 from .metropolis import BinaryGibbsMetropolis
 from .metropolis import CategoricalGibbsMetropolis
 from .metropolis import NormalProposal
+from .metropolis import UniformProposal
 from .metropolis import CauchyProposal
 from .metropolis import LaplaceProposal
 from .metropolis import PoissonProposal
