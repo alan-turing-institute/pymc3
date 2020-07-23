@@ -26,7 +26,7 @@ import pymc3 as pm
 from pymc3.theanof import floatX
 
 __all__ = ['Metropolis', 'DEMetropolis', 'DEMetropolisZ', 'BinaryMetropolis', 'BinaryGibbsMetropolis',
-           'CategoricalGibbsMetropolis', 'NormalProposal', 'CauchyProposal',
+           'CategoricalGibbsMetropolis', 'UniformProposal', 'NormalProposal', 'CauchyProposal',
            'LaplaceProposal', 'PoissonProposal', 'MultivariateNormalProposal',
            'RecursiveDAProposal', 'MLDA']
 
@@ -938,18 +938,18 @@ class MLDA(ArrayStepShared):
         step=MLDA(tune=False, ...) and then sample(step=step, tune=200, ...),
         tuning will be activated for the first 200 steps. If base_sampler is
         'DEMetropolisZ', it should be True. For 'DEMetropolisZ', there is a separate
-        argument tuning_target which allows modifying the type of tuning.
-    tune_target: string
+        argument base_tune_target which allows modifying the type of tuning.
+    base_tune_target: string
         Defines the type of tuning that is performed when base_sampler is
         'DEMetropolisZ'. Allowable values are 'lambda, 'scaling' or None and
         it defaults to 'lambda'.
     base_tune_interval : int
         The frequency of tuning for the base proposal. Defaults to 100
         iterations.
-    lamb : float
+    base_lamb : float
         Lambda parameter of the base level DE proposal mechanism. Only applicable when
         base_sampler is 'DEMetropolisZ'. Defaults to 2.38 / sqrt(2 * ndim)
-    tune_drop_fraction: float
+    base_tune_drop_fraction: float
         Fraction of tuning steps that will be removed from the base level samplers
         history when the tuning ends. Only applicable when base_sampler is
         'DEMetropolisZ'. Defaults to 0.9 - keeping the last 10% of tuning steps
@@ -979,21 +979,21 @@ class MLDA(ArrayStepShared):
         ... datum = 1
         ...
         ... with pm.Model() as coarse_model:
-        ...     x = Normal("x", mu=0, sigma=10)
-        ...     y = Normal("y", mu=x, sigma=1, observed=datum - 0.1)
+        ...     x = pm.Normal("x", mu=0, sigma=10)
+        ...     y = pm.Normal("y", mu=x, sigma=1, observed=datum - 0.1)
         ...
         ... with pm.Model():
-        ...     x = Normal("x", mu=0, sigma=10)
-        ...     y = Normal("y", mu=x, sigma=1, observed=datum)
+        ...     x = pm.Normal("x", mu=0, sigma=10)
+        ...     y = pm.Normal("y", mu=x, sigma=1, observed=datum)
         ...     step_method = pm.MLDA(coarse_models=[coarse_model]
         ...                           subsampling_rates=5)
-        ...     trace = pm.sample(ndraws=500, chains=2,
+        ...     trace = pm.sample(draws=500, chains=2,
         ...                       tune=100, step=step_method,
         ...                       random_seed=123)
         ...
         ... pm.summary(trace)
             mean     sd	     hpd_3%	   hpd_97%
-        x	1.011	 0.975	 -0.925	   2.824
+        x	0.982	1.026	 -0.994	   2.902
 
     A more complete example of how to use MLDA in a realistic
     multilevel problem can be found in:
@@ -1024,8 +1024,8 @@ class MLDA(ArrayStepShared):
 
     def __init__(self, coarse_models, vars=None, base_sampler='DEMetropolisZ',
                  base_S=None, base_proposal_dist=None, base_scaling=None,
-                 tune=True, tune_target='lambda', base_tune_interval=100,
-                 lamb=None, tune_drop_fraction=0.9, model=None, mode=None,
+                 tune=True, base_tune_target='lambda', base_tune_interval=100,
+                 base_lamb=None, base_tune_drop_fraction=0.9, model=None, mode=None,
                  subsampling_rates=5, base_blocked=False, **kwargs):
 
         warnings.warn(
@@ -1071,17 +1071,17 @@ class MLDA(ArrayStepShared):
                              f" a 'DEMetropolisZ' base sampler. 'DEMetropolisZ' "
                              f" tune needs to be True.")
 
-        self.tune_target = tune_target
+        self.base_tune_target = base_tune_target
         self.base_tune_interval = base_tune_interval
-        self.lamb = lamb
-        self.tune_drop_fraction = float(tune_drop_fraction)
+        self.base_lamb = base_lamb
+        self.base_tune_drop_fraction = float(base_tune_drop_fraction)
         self.model = model
         self.next_model = self.coarse_models[-1]
         self.mode = mode
         self.base_blocked = base_blocked
         self.base_scaling_stats = None
         if self.base_sampler == 'DEMetropolisZ':
-            self.lambda_stats = None
+            self.base_lambda_stats = None
 
         # Process model variables
         if vars is None:
@@ -1139,11 +1139,11 @@ class MLDA(ArrayStepShared):
                     self.next_step_method = pm.DEMetropolisZ(vars=vars_next,
                                                              S=self.base_S,
                                                              proposal_dist=self.base_proposal_dist,
-                                                             lamb=self.lamb,
+                                                             lamb=self.base_lamb,
                                                              scaling=self.base_scaling,
-                                                             tune=self.tune_target,
+                                                             tune=self.base_tune_target,
                                                              tune_interval=self.base_tune_interval,
-                                                             tune_drop_fraction=self.tune_drop_fraction,
+                                                             tune_drop_fraction=self.base_tune_drop_fraction,
                                                              model=None,
                                                              mode=self.mode,
                                                              **{"is_mlda_base": True})
@@ -1161,10 +1161,10 @@ class MLDA(ArrayStepShared):
                                                 base_proposal_dist=self.base_proposal_dist,
                                                 base_scaling=self.base_scaling,
                                                 tune=self.tune,
-                                                tune_target=self.tune_target,
+                                                base_tune_target=self.base_tune_target,
                                                 base_tune_interval=self.base_tune_interval,
-                                                lamb=self.lamb,
-                                                tune_drop_fraction=self.tune_drop_fraction,
+                                                base_lamb=self.base_lamb,
+                                                base_tune_drop_fraction=self.base_tune_drop_fraction,
                                                 model=None, mode=self.mode,
                                                 subsampling_rates=next_subsampling_rates,
                                                 coarse_models=next_coarse_models,
@@ -1181,9 +1181,9 @@ class MLDA(ArrayStepShared):
                                                  self.tune,
                                                  self.subsampling_rates[-1])
 
-        # add 'lambda' to stats if 'DEMetropolisZ' is used
+        # add 'base_lambda' to stats if 'DEMetropolisZ' is used
         if self.base_sampler == 'DEMetropolisZ':
-            self.stats_dtypes[0]['lambda'] = np.float64
+            self.stats_dtypes[0]['base_lambda'] = np.float64
 
     def astep(self, q0):
         """One MLDA step, given current sample q0"""
@@ -1235,7 +1235,7 @@ class MLDA(ArrayStepShared):
         # Capture latest base chain scaling stats from next step method
         self.base_scaling_stats = {}
         if self.base_sampler == "DEMetropolisZ":
-            self.lambda_stats = {}
+            self.base_lambda_stats = {}
         if isinstance(self.next_step_method, CompoundStep):
             # next method is Compound Metropolis
             scaling_list = []
@@ -1246,15 +1246,15 @@ class MLDA(ArrayStepShared):
             # next method is any block sampler
             self.base_scaling_stats = {"base_scaling": np.array(self.next_step_method.scaling)}
             if self.base_sampler == "DEMetropolisZ":
-                self.lambda_stats = {"lambda": self.next_step_method.lamb}
+                self.base_lambda_stats = {"base_lambda": self.next_step_method.lamb}
         else:
             # next method is MLDA - propagate dict from lower levels
             self.base_scaling_stats = self.next_step_method.base_scaling_stats
             if self.base_sampler == "DEMetropolisZ":
-                self.lambda_stats = self.next_step_method.lambda_stats
+                self.base_lambda_stats = self.next_step_method.base_lambda_stats
         stats = {**stats, **self.base_scaling_stats}
         if self.base_sampler == "DEMetropolisZ":
-            stats = {**stats, **self.lambda_stats}
+            stats = {**stats, **self.base_lambda_stats}
 
         return q_new, [stats]
 
