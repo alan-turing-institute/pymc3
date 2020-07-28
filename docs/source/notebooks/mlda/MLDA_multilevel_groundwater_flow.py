@@ -308,7 +308,7 @@ with pm.Model():
     # Also initialise a Metropolis step method object
     step_metropolis = pm.Metropolis(tune=tune, tune_interval=tune_interval, blocked=blocked)
     step_mlda = pm.MLDA(subsampling_rates=nsub, coarse_models=coarse_models,
-                        tune_interval=tune_interval, base_sampler='DEMetropolisZ')
+                        base_tune_interval=tune_interval, base_sampler='DEMetropolisZ')
     step_demetropolisz = pm.DEMetropolisZ(tune_interval=tune_interval)
 
     # Inference!
