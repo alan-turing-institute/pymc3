@@ -74,6 +74,7 @@ sys.setrecursionlimit(10000)
 
 __all__ = [
     "sample",
+    "subsample",
     "iter_sample",
     "sample_posterior_predictive",
     "sample_posterior_predictive_w",
@@ -636,7 +637,8 @@ def sample(
         return idata
     else:
         return trace
-        
+
+
 def subsample(
     draws=1,
     step=None,
@@ -648,18 +650,15 @@ def subsample(
     callback=None,
     **kwargs
 ):
-    '''
-    subsample() is a stripped down version of sample(), which is called only
-    by the RecursiveDAProposal, using some standard arguments, and hence
-    all the check employed by the original version. It directly calls _iter_sample(),
-    rather than sample_many() to reduce the overhead of running many subchains,
-    while using the MLDA sampler.
-    '''
+    """A stripped down version of sample(), which is called only
+    by the RecursiveDAProposal (which is the proposal used in the MLDA stepper).
+    It uses some all necessary arguments and checks for the context in which it
+    is used and thus skips some of the code in sampler(). It directly calls
+    _iter_sample(), rather than sample_many(). The result is a reduced overhead
+    when running multiple levels in MLDA."""
     
     model = modelcontext(model)
-
     chain = 0
-        
     random_seed = np.random.randint(2 ** 30)
 
     if start is not None:
