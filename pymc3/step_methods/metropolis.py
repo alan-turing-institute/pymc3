@@ -96,15 +96,14 @@ class RecursiveDAProposal(Proposal):
         self.next_model = next_model
         self.tune = tune
         self.subsampling_rate = subsampling_rate
-        self.trace=None
+        self.trace = None
 
     def __call__(self, q0_dict):
         """Returns proposed sample  given the current sample
-        in dictionary form (q0_dict).
-        """
+        in dictionary form (q0_dict)."""
 
         # Logging is reduced to avoid extensive console output
-        # during multiple recursive calls of sample()
+        # during multiple recursive calls of subsample()
         _log = logging.getLogger('pymc3')
         _log.setLevel(logging.ERROR)
 
@@ -118,13 +117,13 @@ class RecursiveDAProposal(Proposal):
             if self.tune:
                 # Subsample in tuning mode
                 self.trace = pm.subsample(draws=0, step=self.next_step_method,
-                                   start=q0_dict, trace=self.trace, 
-                                   tune=self.subsampling_rate)
+                                          start=q0_dict, trace=self.trace,
+                                          tune=self.subsampling_rate)
             else:
                 # Subsample in normal mode without tuning
                 self.trace = pm.subsample(draws=self.subsampling_rate,
-                                   step=self.next_step_method,
-                                   start=q0_dict, trace=self.trace)
+                                          step=self.next_step_method,
+                                          start=q0_dict, trace=self.trace)
 
         # set logging back to normal
         _log.setLevel(logging.NOTSET)
