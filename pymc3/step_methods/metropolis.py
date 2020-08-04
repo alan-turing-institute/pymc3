@@ -842,8 +842,26 @@ class DEMetropolisZ(ArrayStepShared):
         # flag used for signifying the end of tuning when is_mlda_base is True
         self.tuning_end_trigger = False
 
+        # flag to indicate this stepper was instantiated within an MLDA stepper
+        # and variance reduction is activated - forces DEMetropolisZ to temparirily store
+        # quantities of interest in a register if True
+        self.mlda_variance_reduction = kwargs.pop("mlda_variance_reduction", False)
+
+        if self.mlda_variance_reduction:
+            # Subsampling rate of MLDA sampler one level up
+            self.mlda_subsampling_rate_above = kwargs.pop("mlda_subsampling_rate_above")
+            self.sub_counter = 0
+            self.Q_last = np.nan
+            self.Q_reg = [np.nan] * self.mlda_subsampling_rate_above
+            self.acceptance_reg = [None] * self.mlda_subsampling_rate_above
+            self.model = model
+
         shared = pm.make_shared_replacements(vars, model)
-        self.delta_logp = delta_logp(model.logpt, vars, shared)
+        if self.mlda_variance_reduction:
+            self.delta_logp = delta_logp_inverse(model.logpt, vars, shared)
+        else:
+            self.delta_logp = delta_logp(model.logpt, vars, shared)
+
         super().__init__(vars, shared)
 
     def reset_tuning(self):
@@ -892,6 +910,17 @@ class DEMetropolisZ(ArrayStepShared):
         q_new, accepted = metrop_select(accept, q, q0)
         self.accepted += accepted
         self._history.append(q_new)
+
+        if self.is_mlda_base and self.mlda_variance_reduction:
+            if accepted:
+                self.Q_last = self.model.Q.get_value()
+            if not self.tune:
+                if self.sub_counter == self.mlda_subsampling_rate_above:
+                    self.sub_counter = 0
+                self.Q_reg[self.sub_counter] = self.Q_last
+                self.acceptance_reg[self.sub_counter] = accepted
+                self.sub_counter += 1
+
         self.steps_until_tune -= 1
 
         stats = {
