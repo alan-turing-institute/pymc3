@@ -1,3 +1,5 @@
+# Variance reduction in MLDA
+
 # Import modules
 
 # Import groundwater flow model utils
@@ -21,7 +23,7 @@ os.environ['OPENBLAS_NUM_THREADS'] = '1'  # Set environmental variable
 # points in each dimension. For example, here we set resolutions =
 # [(30, 30), (120, 120)] which creates a coarse, cheap 30x30 model and
 # a fine, expensive 120x120 model.
-resolutions = [(10, 10), (20, 20), (40, 40)]
+resolutions = [(20, 20), (30, 30), (60, 60)]
 
 # Set random field parameters
 field_mean = 0
@@ -32,10 +34,10 @@ lamb_cov = 0.1
 nparam = 2
 
 # Number of draws from the distribution
-ndraws = 500
+ndraws = 1000
 
 # Number of burn-in samples
-nburn = 200
+nburn = 1000
 
 # MLDA and Metropolis tuning parameters
 tune = True
@@ -46,7 +48,7 @@ discard_tuning = True
 nchains = 20
 
 # Subsampling rate for MLDA
-nsub = 3
+nsub = 5
 
 # variance reduction
 vr = True
@@ -249,23 +251,24 @@ with pm.Model() as fine_model:
                              tune=tune, tune_interval=tune_interval, base_blocked=blocked,
                              variance_reduction=vr)
 
-    # MLDA without variance reduction
-    t_start = time.time()
-    method_names.append("MLDA_without_vr")
-    traces.append(pm.sample(draws=ndraws, step=step_mlda_without,
-                            chains=nchains, tune=nburn,
-                            discard_tuned_samples=discard_tuning,
-                            random_seed=sampling_seed))
-    runtimes.append(time.time() - t_start)
-
     # MLDA with variance reduction
     t_start = time.time()
     method_names.append("MLDA_with_vr")
     traces.append(pm.sample(draws=ndraws, step=step_mlda_with,
                             chains=nchains, tune=nburn,
                             discard_tuned_samples=discard_tuning,
-                            random_seed=sampling_seed))
+                            random_seed=sampling_seed, cores=1))
     runtimes.append(time.time() - t_start)
+
+    # MLDA without variance reduction
+    t_start = time.time()
+    method_names.append("MLDA_without_vr")
+    traces.append(pm.sample(draws=ndraws, step=step_mlda_without,
+                            chains=nchains, tune=nburn,
+                            discard_tuned_samples=discard_tuning,
+                            random_seed=sampling_seed, cores=1))
+    runtimes.append(time.time() - t_start)
+
 
 # Print performance metrics
 for i, trace in enumerate(traces):
@@ -298,10 +301,10 @@ plt.show()
 # - Standard approach: Using only Q values from the fine chain (Q_2)
 # - Telescopic sum approach: Using Q values from the the coarsest chain (Q_0),
 #   plus all estimates of differences between levels (e.g. Q_1_0, Q_2_1, etc)
-Q_2 = traces[0].get_sampler_stats("Q_2").reshape((nchains, ndraws))
-Q_0 = np.concatenate(traces[1].get_sampler_stats("Q_0")).reshape((nchains, ndraws * nsub * nsub))
-Q_1_0 = np.concatenate(traces[1].get_sampler_stats("Q_1_0")).reshape((nchains, ndraws * nsub))
-Q_2_1 = np.concatenate(traces[1].get_sampler_stats("Q_2_1")).reshape((nchains, ndraws))
+Q_2 = traces[1].get_sampler_stats("Q_2").reshape((nchains, ndraws))
+Q_0 = np.concatenate(traces[0].get_sampler_stats("Q_0")).reshape((nchains, ndraws * nsub * nsub))
+Q_1_0 = np.concatenate(traces[0].get_sampler_stats("Q_1_0")).reshape((nchains, ndraws * nsub))
+Q_2_1 = np.concatenate(traces[0].get_sampler_stats("Q_2_1")).reshape((nchains, ndraws))
 Q_mean_standard = Q_2.mean(axis=1).mean()
 Q_var_standard = Q_2.mean(axis=1).var()
 Q_mean_vr = (Q_0.mean(axis=1) + Q_1_0.mean(axis=1) + Q_2_1.mean(axis=1)).mean()

@@ -1437,7 +1437,6 @@ class MLDA(ArrayStepShared):
                 Q_base[i] = self.next_step_method.methods[last_accepted_index].Q_reg[i]
         return Q_base
 
-
     @staticmethod
     def competence(var, has_grad):
         """Return MLDA competence for given var/has_grad. MLDA currently works
