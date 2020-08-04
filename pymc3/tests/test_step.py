@@ -29,7 +29,7 @@ from .models import (
 from pymc3.sampling import assign_step_methods, sample
 from pymc3.parallel_sampling import ParallelSamplingError
 from pymc3.exceptions import SamplingError
-from pymc3.model import Model
+from pymc3.model import Model, Potential
 from pymc3.step_methods import (
     NUTS,
     BinaryGibbsMetropolis,
@@ -48,7 +48,8 @@ from pymc3.step_methods import (
     MLDA
 )
 from pymc3.theanof import floatX
-from pymc3.distributions import Binomial, Normal, Bernoulli, Categorical, Beta, HalfNormal
+from pymc3.distributions import Binomial, Normal, Bernoulli, Categorical, Beta, HalfNormal, MvNormal
+from pymc3.data import Data
 
 from numpy.testing import assert_array_almost_equal
 import numpy as np
@@ -57,6 +58,7 @@ import pytest
 import theano
 import theano.tensor as tt
 from .helpers import select_by_precision
+from math import isclose
 
 
 class TestStepMethods:  # yield test doesn't work subclassing object
@@ -1408,3 +1410,168 @@ class TestMLDA:
             with pytest.raises(ValueError):
                 step_3 = MLDA(coarse_models=[coarse_model_0, coarse_model_1], subsampling_rates=[3, 4, 10])
 
+    def test_variance_reduction(self):
+        """Test if the right stats are outputed when variance reduction is used in MLDA
+        and if the output estimates are the same (VR estimate vs. standard estimate from
+        the first chain). Uses a linear regression model with multiple levels where
+        approximate levels have some added bias."""
+        # set up the model and data
+        np.random.seed(5673424)
+        size = 50
+        true_intercept = 1
+        true_slope = 2
+        sigma = 1
+        x = np.linspace(0, 1, size)
+        # y = a + b*x
+        true_regression_line = true_intercept + true_slope * x
+        # add noise
+        y = true_regression_line + np.random.normal(0, sigma ** 2, size)
+        s = np.identity(y.shape[0])
+        np.fill_diagonal(s, sigma ** 2)
+
+        # MCMC parameters
+        ndraws = 300
+        ntune = 100
+        nsub = 5
+        nchains = 1
+        seed = 98765
+
+        # define two theano ops with different quantities of interest
+        class ForwardModel1(tt.Op):
+            itypes = [tt.dvector]
+            otypes = [tt.dvector]
+
+            def __init__(self, x, pymc3_model):
+                self.x = x
+                self.pymc3_model = pymc3_model
+
+            def perform(self, node, inputs, outputs):
+                intercept = inputs[0][0]
+                x_coeff = inputs[0][1]
+
+                temp = intercept + x_coeff * x + self.pymc3_model.bias.get_value()
+                self.pymc3_model.Q.set_value(intercept)
+                outputs[0][0] = temp
+
+        class ForwardModel2(tt.Op):
+            itypes = [tt.dvector]
+            otypes = [tt.dvector]
+
+            def __init__(self, x, pymc3_model):
+                self.x = x
+                self.pymc3_model = pymc3_model
+
+            def perform(self, node, inputs, outputs):
+                intercept = inputs[0][0]
+                x_coeff = inputs[0][1]
+
+                temp = intercept + x_coeff * x + self.pymc3_model.bias.get_value()
+                self.pymc3_model.Q.set_value(temp.mean())
+                outputs[0][0] = temp
+
+        # run four MLDA steppers for all combinations of
+        # base_sampler and forward model
+        for stepper in ['Metropolis', 'DEMetropolisZ']:
+            for f in [ForwardModel1, ForwardModel2]:
+                mout = []
+                coarse_models = []
+
+                with Model() as coarse_model_0:
+                    bias = Data('bias', 0.5 * np.ones(y.shape))
+                    Q = Data('Q', np.float64(0.0))
+                    Sigma_e = Data('Sigma_e', s)
+
+                    # Define priors
+                    # sigma = HalfCauchy('sigma', beta=10, testval=1.)
+                    intercept = Normal('Intercept', 0, sigma=20)
+                    x_coeff = Normal('x', 0, sigma=20)
+
+                    theta = tt.as_tensor_variable([intercept, x_coeff])
+
+                    mout.append(f(x, coarse_model_0))
+
+                    output = Potential('output', mout[0](theta))
+
+                    # Define likelihood
+                    likelihood = MvNormal('y', mu=output,
+                                          cov=Sigma_e, observed=y)
+
+                    coarse_models.append(coarse_model_0)
+
+                with Model() as coarse_model_1:
+                    bias = Data('bias', 0.3 * np.ones(y.shape))
+                    Q = Data('Q', np.float64(0.0))
+                    Sigma_e = Data('Sigma_e', s)
+
+                    # Define priors
+                    # sigma = HalfCauchy('sigma', beta=10, testval=1.)
+                    intercept = Normal('Intercept', 0, sigma=20)
+                    x_coeff = Normal('x', 0, sigma=20)
+
+                    theta = tt.as_tensor_variable([intercept, x_coeff])
+
+                    mout.append(f(x, coarse_model_1))
+
+                    output = Potential('output', mout[1](theta))
+
+                    # Define likelihood
+                    likelihood = MvNormal('y', mu=output,
+                                          cov=Sigma_e, observed=y)
+
+                    coarse_models.append(coarse_model_1)
+
+                with Model() as model:
+                    bias = Data('bias', 0.0 * np.ones(y.shape))
+                    Q = Data('Q', np.float64(0.0))
+                    Sigma_e = Data('Sigma_e', s)
+
+                    # Define priors
+                    # sigma = HalfCauchy('sigma', beta=10, testval=1.)
+                    intercept = Normal('Intercept', 0, sigma=20)
+                    x_coeff = Normal('x', 0, sigma=20)
+
+                    theta = tt.as_tensor_variable([intercept, x_coeff])
+
+                    mout.append(f(x, model))
+
+                    output = Potential('output', mout[-1](theta))
+
+                    # Define likelihood
+                    likelihood = MvNormal('y', mu=output,
+                                          cov=Sigma_e, observed=y)
+
+                    step = MLDA(coarse_models=coarse_models,
+                                base_sampler=stepper,
+                                variance_reduction=True,
+                                store_Q_fine=True)
+
+                    trace = sample(draws=ndraws, step=step,
+                                   chains=nchains, tune=ntune, cores=1,
+                                   discard_tuned_samples=True,
+                                   random_seed=seed)
+
+                    Q_2 = trace.get_sampler_stats("Q_2").reshape((nchains, ndraws))
+                    Q_0 = np.concatenate(trace.get_sampler_stats("Q_0")).reshape((nchains, ndraws * nsub * nsub))
+                    Q_1_0 = np.concatenate(trace.get_sampler_stats("Q_1_0")).reshape((nchains, ndraws * nsub))
+                    Q_2_1 = np.concatenate(trace.get_sampler_stats("Q_2_1")).reshape((nchains, ndraws))
+                    Q_mean_standard = Q_2.mean(axis=1).mean()
+                    Q_mean_vr = (Q_0.mean(axis=1) + Q_1_0.mean(axis=1) + Q_2_1.mean(axis=1)).mean()
+
+                    print(f"Q_0 = {Q_0.mean(axis=1)}")
+                    print(f"Q_2 = {Q_2.mean(axis=1).mean()}")
+                    print(f"Q_1_0 = {Q_1_0.mean(axis=1)}")
+                    print(f"Q_2_1 = {Q_2_1.mean(axis=1)}")
+                    print(f"Standard method:    Mean: {Q_mean_standard}")
+                    print(f"VR method:    Mean: {Q_mean_vr}")
+
+                    # check that the standard and VR estimates are close
+                    assert isclose(Q_mean_standard, Q_mean_vr, rel_tol=1e-2)
+
+                    # test that extract_Q_base() function within the MLDA class
+                    # returns the expected result
+                    if stepper == 'Metropolis' and isinstance(f, ForwardModel1):
+                        assert_array_almost_equal(
+                            stepper.next_step_method.extract_Q_base(),
+                            np.array([1.91134434, 2.48161769, 2.48161769, 2.02261781, 2.02261781]),
+                            decimal=select_by_precision(float64=6, float32=4)
+                        )
