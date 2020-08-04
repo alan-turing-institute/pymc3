@@ -284,12 +284,11 @@ class Metropolis(ArrayStepShared):
         if self.is_mlda_base and self.mlda_variance_reduction:
             if accepted:
                 self.Q_last = self.model.Q.get_value()
-            if not self.tune:
-                if self.sub_counter == self.mlda_subsampling_rate_above:
-                    self.sub_counter = 0
-                self.Q_reg[self.sub_counter] = self.Q_last
-                self.acceptance_reg[self.sub_counter] = accepted
-                self.sub_counter += 1
+            if self.sub_counter == self.mlda_subsampling_rate_above:
+                self.sub_counter = 0
+            self.Q_reg[self.sub_counter] = self.Q_last
+            self.acceptance_reg[self.sub_counter] = accepted
+            self.sub_counter += 1
 
         self.steps_until_tune -= 1
 
@@ -914,12 +913,11 @@ class DEMetropolisZ(ArrayStepShared):
         if self.is_mlda_base and self.mlda_variance_reduction:
             if accepted:
                 self.Q_last = self.model.Q.get_value()
-            if not self.tune:
-                if self.sub_counter == self.mlda_subsampling_rate_above:
-                    self.sub_counter = 0
-                self.Q_reg[self.sub_counter] = self.Q_last
-                self.acceptance_reg[self.sub_counter] = accepted
-                self.sub_counter += 1
+            if self.sub_counter == self.mlda_subsampling_rate_above:
+                self.sub_counter = 0
+            self.Q_reg[self.sub_counter] = self.Q_last
+            self.acceptance_reg[self.sub_counter] = accepted
+            self.sub_counter += 1
 
         self.steps_until_tune -= 1
 
