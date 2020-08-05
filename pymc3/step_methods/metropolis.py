@@ -27,11 +27,10 @@ from pymc3.theanof import floatX
 
 import theano.tensor as tt
 
-__all__ = ['Metropolis', 'DEMetropolis', 'DEMetropolisZ', 'MLDA', 'BinaryMetropolis', 'BinaryGibbsMetropolis',
+__all__ = ['Metropolis', 'DEMetropolis', 'DEMetropolisZ', 'BinaryMetropolis', 'BinaryGibbsMetropolis',
            'CategoricalGibbsMetropolis', 'UniformProposal', 'NormalProposal', 'CauchyProposal',
            'LaplaceProposal', 'PoissonProposal', 'MultivariateNormalProposal',
-           'RecursiveDAProposal']
-
+           'RecursiveDAProposal', 'MLDA']
 
 # Available proposal distributions for Metropolis
 
@@ -1155,7 +1154,6 @@ class MLDA(ArrayStepShared):
                                  f"length as list of coarse models but the lengths "
                                  f"were {len(subsampling_rates)}, {len(self.coarse_models)}")
             self.subsampling_rates = subsampling_rates
-
         self.num_levels = len(self.coarse_models) + 1
         self.base_sampler = base_sampler
         self.base_S = base_S
