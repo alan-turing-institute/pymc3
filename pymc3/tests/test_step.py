@@ -1478,7 +1478,7 @@ class TestMLDA:
 
                 with Model() as coarse_model_0:
                     bias = Data('bias', 0.5 * np.ones(y.shape))
-                    Q = Data('Q', np.float64(0.0))
+                    Q = Data('Q', float(0.0))
                     Sigma_e = Data('Sigma_e', s)
 
                     # Define priors
@@ -1500,7 +1500,7 @@ class TestMLDA:
 
                 with Model() as coarse_model_1:
                     bias = Data('bias', 0.3 * np.ones(y.shape))
-                    Q = Data('Q', np.float64(0.0))
+                    Q = Data('Q', float(0.0))
                     Sigma_e = Data('Sigma_e', s)
 
                     # Define priors
@@ -1522,7 +1522,7 @@ class TestMLDA:
 
                 with Model() as model:
                     bias = Data('bias', 0.0 * np.ones(y.shape))
-                    Q = Data('Q', np.float64(0.0))
+                    Q = Data('Q', float(0.0))
                     Sigma_e = Data('Sigma_e', s)
 
                     # Define priors
