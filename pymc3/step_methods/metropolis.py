@@ -116,7 +116,7 @@ class RecursiveDAProposal(Proposal):
             # to False (by MLDA's astep) when the burn-in
             # iterations of the highest-level MLDA sampler run out.
             # The change propagates to all levels.
-                                   
+
             if self.tune:
                 # Subsample in tuning mode
                 self.trace = pm.subsample(draws=0, step=self.next_step_method,
@@ -1143,7 +1143,17 @@ class MLDA(ArrayStepShared):
                 pm.set_data({'mu_B': np.zeros(self.next_model.mu_B.get_value().shape)})
                 pm.set_data({'Sigma_B': np.zeros(self.next_model.Sigma_B.get_value().shape)})
             self.mu_B = self.EvolvingMean(self.next_model.mu_B.get_value())
+            self.mu_B_all = kwargs.pop("mu_B_all", None)
+            if self.mu_B_all is None:
+                self.mu_B_all = [self.mu_B]
+            else:
+                self.mu_B_all.append(self.mu_B)
             self.Sigma_B = self.EvolvingCovariance(self.mu_B, self.next_model.Sigma_B.get_value())
+            self.Sigma_B_all = kwargs.pop("Sigma_B_all", None)
+            if self.Sigma_B_all is None:
+                self.Sigma_B_all = [self.Sigma_B]
+            else:
+                self.Sigma_B_all.append(self.Sigma_B)
             self.last_synced_output_diff = None
             self.adaptation_started = False
 
@@ -1260,6 +1270,14 @@ class MLDA(ArrayStepShared):
                 # make sure the correct variables are selected from next_model
                 vars_next = [var for var in self.next_model.vars
                              if var.name in self.var_names]
+
+                # create kwargs
+                if self.adaptive_error_correction:
+                    mlda_kwargs = {"mu_B_all": self.mu_B_all,
+                                   "Sigma_B_all": self.Sigma_B_all}
+                else:
+                    mlda_kwargs = kwargs
+
                 # MLDA sampler in some intermediate level, targeting self.next_model
                 self.next_step_method = pm.MLDA(vars=vars_next, base_S=self.base_S,
                                                 base_sampler=self.base_sampler,
@@ -1275,7 +1293,7 @@ class MLDA(ArrayStepShared):
                                                 coarse_models=next_coarse_models,
                                                 base_blocked=self.base_blocked,
                                                 adaptive_error_correction=self.adaptive_error_correction,
-                                                **kwargs)
+                                                **mlda_kwargs)
 
         # instantiate the recursive DA proposal.
         # this is the main proposal used for
@@ -1291,8 +1309,8 @@ class MLDA(ArrayStepShared):
         if self.base_sampler == 'DEMetropolisZ':
             self.stats_dtypes[0]['base_lambda'] = np.float64
 
-        if self.adaptive_error_correction:
-            self.stats_dtypes[0]['mu_B'] = np.float64
+        #if self.adaptive_error_correction:
+        #    self.stats_dtypes[0]['mu_B'] = np.float64
 
         self.skip_counter = 0
 
@@ -1331,12 +1349,6 @@ class MLDA(ArrayStepShared):
             skipped_logp = True
             self.skip_counter += 1
         else:
-            if self.num_levels == 2:
-                self.model.mu_B.set_value(np.zeros((200,)))
-                self.model.Sigma_B.set_value(np.zeros((200,200)))
-            else:
-                self.next_model.mu_B.set_value(self.mu_B())
-                self.next_model.Sigma_B.set_value(self.Sigma_B())
             accept = self.delta_logp(q, q0) + self.delta_logp_next(q0, q)
             skipped_logp = False
 
@@ -1347,13 +1359,16 @@ class MLDA(ArrayStepShared):
 
         if self.tune and self.adaptive_error_correction:
             if accepted and not skipped_logp:
-                self.last_synced_output_diff = self.model.model_output.get_value() - self.next_model.model_output.get_value()
+                self.last_synced_output_diff = self.model.model_output.get_value() - \
+                                               self.next_model.model_output.get_value()
                 self.adaptation_started = True
             if self.adaptation_started:
                 self.Sigma_B.update(self.last_synced_output_diff)
                 with self.next_model:
-                    pm.set_data({'mu_B': self.mu_B()})
-                    pm.set_data({'Sigma_B': self.Sigma_B()})
+                    pm.set_data({'mu_B': sum([i() for i in
+                                              self.mu_B_all[:len(self.mu_B_all) - self.num_levels + 2]])})
+                    pm.set_data({'Sigma_B': sum([i() for i in
+                                                 self.Sigma_B_all[:len(self.Sigma_B_all) - self.num_levels + 2]])})
 
         # Update acceptance counter
         self.accepted += accepted
@@ -1388,9 +1403,9 @@ class MLDA(ArrayStepShared):
         if self.base_sampler == "DEMetropolisZ":
             stats = {**stats, **self.base_lambda_stats}
 
-        if self.adaptive_error_correction:
-            self.adaptive_stats = {'mu_B': self.next_model.mu_B.get_value()[0]}
-            stats = {**stats, **self.adaptive_stats}
+        #if self.adaptive_error_correction:
+        #    self.adaptive_stats = {'mu_B': self.next_model.mu_B.get_value()[0]}
+        #    stats = {**stats, **self.adaptive_stats}
 
         return q_new, [stats]
 
