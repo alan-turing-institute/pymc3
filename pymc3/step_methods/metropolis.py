@@ -803,6 +803,7 @@ class DEMetropolisZ(ArrayStepShared):
         self.tune_drop_fraction = tune_drop_fraction
         self.steps_until_tune = tune_interval
         self.accepted = 0
+        self.acc_tune = 0
 
         # cache local history for the Z-proposals
         self._history = []
@@ -824,6 +825,10 @@ class DEMetropolisZ(ArrayStepShared):
 
         shared = pm.make_shared_replacements(vars, model)
         self.delta_logp = delta_logp(model.logpt, vars, shared)
+        self.delta_logp_1 = delta_logp_1(model.logpt, vars, shared)
+        self.delta_logp_0 = delta_logp_0(model.logpt, vars, shared)
+        if self.is_mlda_base:
+            self.model = model
         super().__init__(vars, shared)
 
     def reset_tuning(self):
@@ -873,6 +878,9 @@ class DEMetropolisZ(ArrayStepShared):
         self.accepted += accepted
         self._history.append(q_new)
         self.steps_until_tune -= 1
+
+        if self.tune:
+            self.acc_tune += accepted
 
         stats = {
             'tune': self.tune,
