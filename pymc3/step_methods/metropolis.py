@@ -1125,17 +1125,10 @@ class MLDA(ArrayStepShared):
                                      "Use pm.Data() to define it.")
             if not (isinstance(self.next_model.mu_B, tt.sharedvar.TensorSharedVariable) and
                     isinstance(self.next_model.Sigma_B, tt.sharedvar.TensorSharedVariable)):
-                raise TypeError("At least one of the variables 'mu_B' and 'Sigma_B'"
+                raise TypeError("At least one of the variables 'mu_B' and 'Sigma_B' "
                                 "in the next model's definition is not of type "
-                                "'TensorSharedVariable'. Use pm.Data() to define those"
+                                "'TensorSharedVariable'. Use pm.Data() to define those "
                                 "variables.")
-            #if not ((model.mu_B.dshape == (len(model.vars), )) and
-            #        (model.Sigma_B.dshape == (len(model.vars), len(model.vars)))):
-            #    raise ValueError(f"Model variables 'mu_B' and 'Sigma_B' should have "
-            #                     f"dimension ({len(model.vars)}, ) and "
-            #                     f"({len(model.vars)}, {len(model.vars)}) but they "
-            #                     f"have dimensions {model.mu_B.dshape} and "
-            #                     f"{model.Sigma_B.dshape}")
 
             # initialise the error correction terms
             with self.next_model:
