@@ -24,7 +24,7 @@ from pymc3.theanof import floatX
 
 __all__ = ['Metropolis', 'DEMetropolis', 'DEMetropolisZ', 'BinaryMetropolis', 'BinaryGibbsMetropolis',
            'CategoricalGibbsMetropolis', 'NormalProposal', 'CauchyProposal',
-           'LaplaceProposal', 'PoissonProposal', 'MultivariateNormalProposal']
+           'LaplaceProposal', 'PoissonProposal', 'MultivariateNormalProposal', 'CrankNicolson']
 
 # Available proposal distributions for Metropolis
 
@@ -810,6 +810,157 @@ class DEMetropolisZ(ArrayStepShared):
             return Competence.INCOMPATIBLE
         return Competence.COMPATIBLE
 
+
+class CrankNicolson(ArrayStepShared):
+    """
+    preconditioned Crank Nicolson (pCN) sampling step
+
+    Parameters
+    ----------
+    vars: list
+        List of variables for sampler
+    S: standard deviation or covariance matrix
+        Prior standard deviation or covariance matrix of the random variables.
+    scaling: scalar or array
+        Initial scale factor (beta) for proposal. Defaults to 1.
+    tune: bool
+        Flag for tuning. Defaults to True.
+    tune_interval: int
+        The frequency of tuning. Defaults to 100 iterations.
+    model: PyMC Model
+        Optional model for sampling step. Defaults to None (taken from context).
+    mode:  string or `Mode` instance.
+        compilation mode passed to Theano functions
+    """
+    name = 'preconditioned_crank_nicolson'
+
+    default_blocked = True
+    generates_stats = True
+    stats_dtypes = [{
+        'accept': np.float64,
+        'accepted': np.bool,
+        'tune': np.bool,
+        'scaling': np.float64,
+    }]
+
+    def __init__(self, vars=None, S=None, scaling=0.5, tune=True, 
+                 tune_interval=100, model=None, mode=None, **kwargs):
+
+        model = pm.modelcontext(model)
+
+        if vars is None:
+            vars = model.vars
+        vars = pm.inputvars(vars)
+
+        if S is None:
+            warnings.warn(
+            'No prior variance provided for pCN step method. Assuming identity...'
+            )
+            S = np.ones(sum(v.dsize for v in vars))
+
+        if S.ndim == 1:
+            self.proposal_dist = NormalProposal(S)
+        elif S.ndim == 2:
+            self.proposal_dist = MultivariateNormalProposal(S)
+        else:
+            raise ValueError("Invalid rank for variance: %s" % S.ndim)
+            
+        if scaling > 1 or scaling < 0:
+            raise ValueError('Scaling (beta) must satisfy 0 <= beta <= 1')
+            
+
+        self.scaling = np.atleast_1d(scaling).astype('d')
+        self.tune = tune
+        self.tune_interval = tune_interval
+        self.steps_until_tune = tune_interval
+        self.accepted = 0
+        self.tune_count = 0
+
+        # Determine type of variables
+        self.continuous = np.concatenate(
+            [[v.dtype in pm.continuous_types] * (v.dsize or 1) for v in vars])
+        self.all_continuous = self.continuous.all()
+        if self.all_continuous:
+            pass
+        else:
+            raise ValueError('pCN algorithm only works for continuous variables')
+
+        # remember initial settings before tuning so they can be reset
+        self._untuned_settings = dict(
+            scaling=self.scaling,
+            steps_until_tune=tune_interval,
+            accepted=self.accepted
+        )
+
+        self.mode = mode
+
+        # flag to indicate this stepper was instantiated within an MLDA stepper
+        # if not, tuning parameters are reset when _iter_sample() is called
+        self.is_mlda_base = kwargs.pop("is_mlda_base", False)
+
+        shared = pm.make_shared_replacements(vars, model)
+        
+        # The pCN algorithm is non-symmetric and the acceptance ratio
+        # depends solely on the likelihood.
+        self.delta_logp = delta_logp(model.datalogpt, vars, shared)
+        super().__init__(vars, shared)
+
+    def reset_tuning(self):
+        """Resets the tuned sampler parameters to their initial values.
+           Skipped if stepper is a bottom-level stepper in MLDA."""
+        if not self.is_mlda_base:
+            for attr, initial_value in self._untuned_settings.items():
+                setattr(self, attr, initial_value)
+        return
+
+    def astep(self, q0):
+        if not self.steps_until_tune and self.tune:
+            # Tune scaling parameter
+            self.scaling = tune_pCN(
+                self.scaling, self.accepted / float(self.tune_interval), self.tune_count)
+            # Reset counter
+            self.steps_until_tune = self.tune_interval
+            self.accepted = 0
+            self.tune_count += 1
+            
+        xi = self.proposal_dist()
+
+        # Unlike the Metropolis algorithm, pCN proposes
+        # q = sqrt(1 - beta^2)*q0 + beta*xi
+        q = floatX(np.sqrt(1 - self.scaling**2)*q0 + self.scaling*xi)
+
+        accept = self.delta_logp(q, q0)
+        q_new, accepted = metrop_select(accept, q, q0)
+        self.accepted += accepted
+
+        self.steps_until_tune -= 1
+
+        stats = {
+            'tune': self.tune,
+            'scaling': self.scaling,
+            'accept': np.exp(accept),
+            'accepted': accepted,
+        }
+
+        return q_new, [stats]
+
+    @staticmethod
+    def competence(var, has_grad):
+        return Competence.COMPATIBLE
+
+def tune_pCN(scale, acc_rate, n):
+    """
+    Tunes the scaling (beta) parameter for the pCN proposal
+    according to the acceptance rate over the last tune_interval, and
+    the current tuning count (n) to tend towards the optimal 
+    acceptance rate of alpha = 0.24:
+
+    log(scale_new) = log(scale_old) + 1.1^-n * (acc_rate-0.24)
+
+    """
+    log_scale = np.log(scale) + 1.1**-n * (acc_rate-0.24)
+
+    return np.exp(log_scale)
 
 def sample_except(limit, excluded):
     candidate = nr.choice(limit - 1)

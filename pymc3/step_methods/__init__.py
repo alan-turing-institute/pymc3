@@ -26,6 +26,7 @@ from .metropolis import CauchyProposal
 from .metropolis import LaplaceProposal
 from .metropolis import PoissonProposal
 from .metropolis import MultivariateNormalProposal
+from .metropolis import CrankNicolson
 
 from .gibbs import ElemwiseCategorical
 
