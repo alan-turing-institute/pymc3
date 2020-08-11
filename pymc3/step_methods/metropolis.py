@@ -1107,8 +1107,6 @@ class MLDA(ArrayStepShared):
 
         # assign internal state
         self.coarse_models = coarse_models
-        self.next_model = self.coarse_models[-1]
-        self.adaptive_error_correction = adaptive_error_correction
 
         if not isinstance(coarse_models, list):
             raise ValueError("MLDA step method cannot use "
@@ -1117,6 +1115,9 @@ class MLDA(ArrayStepShared):
             raise ValueError("MLDA step method was given an empty "
                              "list of coarse models. Give at least "
                              "one coarse model.")
+
+        self.next_model = self.coarse_models[-1]
+        self.adaptive_error_correction = adaptive_error_correction
 
         if self.adaptive_error_correction:
             if not hasattr(self.next_model, 'mu_B'):

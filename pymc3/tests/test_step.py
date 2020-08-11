@@ -48,7 +48,7 @@ from pymc3.step_methods import (
     MLDA
 )
 from pymc3.theanof import floatX
-from pymc3.distributions import Binomial, Normal, Bernoulli, Categorical, Beta, HalfNormal, MvNormal, DensityDist
+from pymc3.distributions import Binomial, Normal, Bernoulli, Categorical, Beta, HalfNormal, MvNormal
 from pymc3.data import Data
 
 from numpy.testing import assert_array_almost_equal
@@ -58,7 +58,6 @@ import pytest
 import theano
 import theano.tensor as tt
 from .helpers import select_by_precision
-from math import isclose
 
 
 class TestStepMethods:  # yield test doesn't work subclassing object
@@ -1429,8 +1428,12 @@ class TestMLDA:
 
         # forward model Op - here, just the regression equation
         class ForwardModel(tt.Op):
-            itypes = [tt.dvector]
-            otypes = [tt.dvector]
+            if theano.config.floatX == "float32":
+                itypes = [tt.fvector]
+                otypes = [tt.fvector]
+            else:
+                itypes = [tt.dvector]
+                otypes = [tt.dvector]
 
             def __init__(self, x, pymc3_model):
                 self.x = x
