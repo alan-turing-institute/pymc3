@@ -1049,48 +1049,6 @@ class MLDA(ArrayStepShared):
         'base_scaling': object
     }]
 
-    class EvolvingMean:
-        """
-        EvolvingMean iteratively constructs mu_B,
-        i.e. the model bias mean
-        """
-        def __init__(self, mu_0, t=1):
-            self.mu = mu_0
-            self.t = t
-
-        def __call__(self):
-            return self.mu
-
-        def update(self, diff):
-            self.mu = (1 / (self.t + 1)) * (self.t * self.mu + diff)
-            self.t += 1
-
-    class EvolvingCovariance:
-        """
-        EvolvingCovariance iteratively constructs
-        Sigma_B, i.e the model bias
-        covariance matrix, using an EvolvingMean.
-        """
-        def __init__(self, evolving_mean, sigma):
-            self.mu = evolving_mean
-            self.sigma = sigma
-            self.mu_prev = None
-
-        def __call__(self):
-            return self.sigma
-
-        def update(self, diff):
-            self.mu_prev = self.mu().copy()
-            self.mu.update(diff)
-            self.sigma = self.compute_sigma(diff)
-
-        def compute_sigma(self, diff):
-            t = self.mu.t - 1
-            return (t - 1) / t * self.sigma + 1 / t * \
-                   (t * np.outer(self.mu_prev, self.mu_prev) -
-                    (t + 1) * np.outer(self.mu(), self.mu()) +
-                    np.outer(diff, diff))
-
     def __init__(self, coarse_models, vars=None, base_sampler='DEMetropolisZ',
                  base_S=None, base_proposal_dist=None, base_scaling=None,
                  tune=True, base_tune_target='lambda', base_tune_interval=100,
@@ -1117,6 +1075,7 @@ class MLDA(ArrayStepShared):
                              "one coarse model.")
 
         self.next_model = self.coarse_models[-1]
+        
         self.adaptive_error_correction = adaptive_error_correction
 
         if self.adaptive_error_correction:
@@ -1140,21 +1099,20 @@ class MLDA(ArrayStepShared):
                                 "variables.")
 
             # initialise the error correction terms
-            with self.next_model:
-                pm.set_data({'mu_B': np.zeros(self.next_model.mu_B.get_value().shape)})
-                pm.set_data({'Sigma_B': np.zeros(self.next_model.Sigma_B.get_value().shape)})
-            self.mu_B = self.EvolvingMean(self.next_model.mu_B.get_value())
-            self.mu_B_all = kwargs.pop("mu_B_all", None)
-            if self.mu_B_all is None:
-                self.mu_B_all = [self.mu_B]
+            #with self.next_model:
+            #    pm.set_data({'mu_B': np.zeros(self.next_model.mu_B.get_value().shape)})
+            #    pm.set_data({'Sigma_B': np.zeros(self.next_model.Sigma_B.get_value().shape)})
+            
+            self.bias = RecursiveSampleMoments(self.next_model.mu_B.get_value(),
+                                                self.next_model.Sigma_B.get_value())
+            
+            self.bias_all = kwargs.pop("bias_all", None)
+            
+            if self.bias_all is None:
+                self.bias_all = [self.bias]
             else:
-                self.mu_B_all.append(self.mu_B)
-            self.Sigma_B = self.EvolvingCovariance(self.mu_B, self.next_model.Sigma_B.get_value())
-            self.Sigma_B_all = kwargs.pop("Sigma_B_all", None)
-            if self.Sigma_B_all is None:
-                self.Sigma_B_all = [self.Sigma_B]
-            else:
-                self.Sigma_B_all.append(self.Sigma_B)
+                self.bias_all.append(self.bias)
+
             self.last_synced_output_diff = None
             self.adaptation_started = False
 
@@ -1274,8 +1232,7 @@ class MLDA(ArrayStepShared):
 
                 # create kwargs
                 if self.adaptive_error_correction:
-                    mlda_kwargs = {"mu_B_all": self.mu_B_all,
-                                   "Sigma_B_all": self.Sigma_B_all}
+                    mlda_kwargs = {"bias_all": self.bias_all}
                 else:
                     mlda_kwargs = kwargs
 
@@ -1364,12 +1321,12 @@ class MLDA(ArrayStepShared):
                                                self.next_model.model_output.get_value()
                 self.adaptation_started = True
             if self.adaptation_started:
-                self.Sigma_B.update(self.last_synced_output_diff)
+                self.bias.update(self.last_synced_output_diff)
                 with self.next_model:
-                    pm.set_data({'mu_B': sum([i() for i in
-                                              self.mu_B_all[:len(self.mu_B_all) - self.num_levels + 2]])})
-                    pm.set_data({'Sigma_B': sum([i() for i in
-                                                 self.Sigma_B_all[:len(self.Sigma_B_all) - self.num_levels + 2]])})
+                    pm.set_data({'mu_B': sum([bias.get_mu() for bias in
+                                              self.bias_all[:len(self.bias_all) - self.num_levels + 2]])})
+                    pm.set_data({'Sigma_B': sum([bias.get_sigma() for bias in
+                                                 self.bias_all[:len(self.bias_all) - self.num_levels + 2]])})
 
         # Update acceptance counter
         self.accepted += accepted
@@ -1417,6 +1374,39 @@ class MLDA(ArrayStepShared):
         if var.dtype in pm.discrete_types:
             return Competence.INCOMPATIBLE
         return Competence.COMPATIBLE
+                
+
+class RecursiveSampleMoments:
+    """
+    SequentialSampleMoment iteratively constructs a sample mean
+    and covariance, given some input samples.
+    """
+    def __init__(self, mu_0, sigma_0, t=1):
+        self.mu = mu_0
+        self.sigma = sigma_0
+        self.t = t
+        
+    def __call__(self):
+        return (self.mu, self.sigma)
+
+    def get_mu(self):
+        return self.mu
+        
+    def get_sigma(self):
+        return self.sigma
+
+    def update(self, x):
+        
+        mu_previous = self.mu.copy()
+        
+        self.mu = (1 / (self.t + 1)) * (self.t * mu_previous + x)
+        
+        self.sigma = (self.t - 1) / self.t * self.sigma + 1 / self.t * \
+                     (self.t * np.outer(mu_previous, mu_previous) -
+                     (self.t + 1) * np.outer(self.mu, self.mu) +
+                     np.outer(x, x))
+        
+        self.t += 1
 
 
 def sample_except(limit, excluded):
