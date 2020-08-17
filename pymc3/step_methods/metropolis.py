@@ -1097,17 +1097,11 @@ class MLDA(ArrayStepShared):
                                 "in the next model's definition is not of type "
                                 "'TensorSharedVariable'. Use pm.Data() to define those "
                                 "variables.")
-
-            # initialise the error correction terms
-            #with self.next_model:
-            #    pm.set_data({'mu_B': np.zeros(self.next_model.mu_B.get_value().shape)})
-            #    pm.set_data({'Sigma_B': np.zeros(self.next_model.Sigma_B.get_value().shape)})
             
             self.bias = RecursiveSampleMoments(self.next_model.mu_B.get_value(),
-                                                self.next_model.Sigma_B.get_value())
+                                               self.next_model.Sigma_B.get_value())
             
             self.bias_all = kwargs.pop("bias_all", None)
-            
             if self.bias_all is None:
                 self.bias_all = [self.bias]
             else:
@@ -1378,8 +1372,12 @@ class MLDA(ArrayStepShared):
 
 class RecursiveSampleMoments:
     """
-    SequentialSampleMoment iteratively constructs a sample mean
-    and covariance, given some input samples.
+    Iteratively constructs a sample mean
+    and covariance, given input samples.
+
+    Used to capture an estimate of the mean
+    and covariance of the bias of an MLDA
+    coarse model.
     """
     def __init__(self, mu_0, sigma_0, t=1):
         self.mu = mu_0
@@ -1387,16 +1385,19 @@ class RecursiveSampleMoments:
         self.t = t
         
     def __call__(self):
-        return (self.mu, self.sigma)
+        return self.mu, self.sigma
 
     def get_mu(self):
+        """Returns the current mu value"""
         return self.mu
         
     def get_sigma(self):
+        """Returns the current covariance value"""
         return self.sigma
 
     def update(self, x):
-        
+        """Updates the mean and covariance given a
+        new sample x"""
         mu_previous = self.mu.copy()
         
         self.mu = (1 / (self.t + 1)) * (self.t * mu_previous + x)
