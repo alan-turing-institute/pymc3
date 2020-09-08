@@ -1306,6 +1306,7 @@ class MLDA(ArrayStepShared):
         # initialise necessary variables for doing variance reduction or storing fine Q
         if self.variance_reduction or self.store_Q_fine:
             self.Q_last = np.nan
+            self.Q_diff_last = np.nan
         if self.store_Q_fine and not self.is_child:
             self.stats_dtypes[0][f'Q_{self.num_levels - 1}'] = object
 
@@ -1367,13 +1368,16 @@ class MLDA(ArrayStepShared):
 
             r = np.random.randint(0, self.subsampling_rates[-1])
             if isinstance(self.next_step_method, CompoundStep):
-                self.Q_diff.append(self.Q_last - Q_base[r])
+                if accepted and not skipped_logp:
+                    self.Q_diff_last = self.Q_last - Q_base[r]
                 #self.Q_diff.append(self.Q_last - Q_base[self.subsampling_rates[-1] - 1])
                 self.Q_random.append(Q_base[r])
             else:
-                self.Q_diff.append(self.Q_last - self.next_step_method.Q_reg[r])
+                if accepted and not skipped_logp:
+                    self.Q_diff_last = self.Q_last - self.next_step_method.Q_reg[r]
                 #self.Q_diff.append(self.Q_last - self.next_step_method.Q_reg[self.subsampling_rates[-1] - 1])
                 self.Q_random.append(self.next_step_method.Q_reg[r])
+            self.Q_diff.append(self.Q_diff_last)
 
         # Update acceptance counter
         self.accepted += accepted
