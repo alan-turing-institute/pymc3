@@ -1292,13 +1292,15 @@ class MLDA(ArrayStepShared):
         if self.variance_reduction:
             self.sub_counter = 0
             self.Q_diff = []
+            self.Q_random = []
             if self.is_child:
                 self.Q_reg = [np.nan] * self.subsampling_rate_above
             if self.num_levels == 2:
                 self.Q_base_full = []
             if not self.is_child:
                 for level in range(self.num_levels - 1, 0, -1):
-                    self.stats_dtypes[0][f'Q_{level}_{level-1}'] = object
+                    self.stats_dtypes[0][f'Q_{level}_{level - 1}'] = object
+                    self.stats_dtypes[0][f'Q_{level - 1}_random'] = object
                 self.stats_dtypes[0]['Q_0'] = object
 
         # initialise necessary variables for doing variance reduction or storing fine Q
@@ -1366,8 +1368,12 @@ class MLDA(ArrayStepShared):
             r = np.random.randint(0, self.subsampling_rates[-1])
             if isinstance(self.next_step_method, CompoundStep):
                 self.Q_diff.append(self.Q_last - Q_base[r])
+                #self.Q_diff.append(self.Q_last - Q_base[self.subsampling_rates[-1] - 1])
+                self.Q_random.append(Q_base[r])
             else:
                 self.Q_diff.append(self.Q_last - self.next_step_method.Q_reg[r])
+                #self.Q_diff.append(self.Q_last - self.next_step_method.Q_reg[self.subsampling_rates[-1] - 1])
+                self.Q_random.append(self.next_step_method.Q_reg[r])
 
         # Update acceptance counter
         self.accepted += accepted
@@ -1409,6 +1415,8 @@ class MLDA(ArrayStepShared):
                 for level in range(self.num_levels - 1, 0, -1):
                     q_stats[f'Q_{level}_{level - 1}'] = np.array(m.Q_diff)
                     m.Q_diff = []
+                    q_stats[f'Q_{level - 1}_random'] = np.array(m.Q_random)
+                    m.Q_random = []
                     if level == 1:
                         break
                     m = m.next_step_method
