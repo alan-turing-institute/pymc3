@@ -990,10 +990,29 @@ class MLDA(ArrayStepShared):
         or a blocked Metropolis step (base_blocked=True).
     adaptive_error_correction : bool
         When True, MLDA will use the adaptive error correction method
-        proposed in [Cui2012]. The method requires
-        the likelihood of the model to be adaptive and thus only
-        works when the user writes the model definition in a
-        certain way that is demonstrated in the examples.
+        proposed in [Cui2012]. The method requires the likelihood of
+        the model to be adaptive and a forward model to be defined and
+        fed to the sampler. Thus, it only works when the user does
+        the following (also demonstrated in the example notebook):
+            - Include in the model definition at all levels,
+            the extra variable model_output, which will capture
+            the forward model outputs. Also include in the model
+            definition at all levels except the finest one, the
+            extra variables mu_B and Sigma_B, which will capture
+            the bias between different levels. All these variables
+            should be instantiated using the pm.Data method.
+            - Use a Theano Op to define the forward model (and
+            optionally the likelihood) for all levels. The Op needs
+            to store the result of each forward model calculation
+            to the variable model_output of the PyMC3 model.
+            - Define a Multivariate Normal likelihood (either using
+            the standard PyMC3 API or within an Op) which has mean
+            equal to the forward model output plus mu_B and covariance
+            equal to the model error plus Sigma_B.
+        Given the above, MLDA will capture and iteratively update the
+        bias terms internally for all level pairs and will correct
+        each level so that the all levels' forward models estimate
+        the finest level's forward model.
 
     Examples
     ----------
@@ -1078,6 +1097,8 @@ class MLDA(ArrayStepShared):
         
         self.adaptive_error_correction = adaptive_error_correction
 
+        # check that certain requirements hold
+        # for adaptive error correction to work
         if self.adaptive_error_correction:
             if not hasattr(self.next_model, 'mu_B'):
                 raise AttributeError("Next model in hierarchy does not contain"
@@ -1097,16 +1118,23 @@ class MLDA(ArrayStepShared):
                                 "in the next model's definition is not of type "
                                 "'TensorSharedVariable'. Use pm.Data() to define those "
                                 "variables.")
-            
+
+            # this object is used to recursively update the mean and
+            # variance of the bias correction given new differences
+            # between levels
             self.bias = RecursiveSampleMoments(self.next_model.mu_B.get_value(),
                                                self.next_model.Sigma_B.get_value())
             
+            # this list holds the bias objects from all levels
+            # it is gradually constructed when MLDA objects are
+            # created and then shared between all levels
             self.bias_all = kwargs.pop("bias_all", None)
             if self.bias_all is None:
                 self.bias_all = [self.bias]
             else:
                 self.bias_all.append(self.bias)
 
+            # variables used for adaptive error correction
             self.last_synced_output_diff = None
             self.adaptation_started = False
 
@@ -1142,7 +1170,6 @@ class MLDA(ArrayStepShared):
         self.base_lamb = base_lamb
         self.base_tune_drop_fraction = float(base_tune_drop_fraction)
         self.model = model
-
         self.mode = mode
         self.base_blocked = base_blocked
         self.base_scaling_stats = None
@@ -1261,11 +1288,6 @@ class MLDA(ArrayStepShared):
         if self.base_sampler == 'DEMetropolisZ':
             self.stats_dtypes[0]['base_lambda'] = np.float64
 
-        #if self.adaptive_error_correction:
-        #    self.stats_dtypes[0]['mu_B'] = np.float64
-
-        self.skip_counter = 0
-
     def astep(self, q0):
         """One MLDA step, given current sample q0"""
         # Check if the tuning flag has been changed and, if yes,
@@ -1292,14 +1314,9 @@ class MLDA(ArrayStepShared):
         # Evaluate MLDA acceptance log-ratio
         # If proposed sample from lower levels is the same as current one,
         # do not calculate likelihood, just set accept to 0.0
-
-        a = self.num_levels
-        #if a == 3:
-            #print(self.num_levels)
         if (q == q0).all():
             accept = np.float(0.0)
             skipped_logp = True
-            self.skip_counter += 1
         else:
             accept = self.delta_logp(q, q0) + self.delta_logp_next(q0, q)
             skipped_logp = False
@@ -1309,18 +1326,9 @@ class MLDA(ArrayStepShared):
         if skipped_logp:
             accepted = False
 
+        # Adaptive error correction - runs only during tuning.
         if self.tune and self.adaptive_error_correction:
-            if accepted and not skipped_logp:
-                self.last_synced_output_diff = self.model.model_output.get_value() - \
-                                               self.next_model.model_output.get_value()
-                self.adaptation_started = True
-            if self.adaptation_started:
-                self.bias.update(self.last_synced_output_diff)
-                with self.next_model:
-                    pm.set_data({'mu_B': sum([bias.get_mu() for bias in
-                                              self.bias_all[:len(self.bias_all) - self.num_levels + 2]])})
-                    pm.set_data({'Sigma_B': sum([bias.get_sigma() for bias in
-                                                 self.bias_all[:len(self.bias_all) - self.num_levels + 2]])})
+            self.update_error_estimate(accepted, skipped_logp)
 
         # Update acceptance counter
         self.accepted += accepted
@@ -1355,11 +1363,37 @@ class MLDA(ArrayStepShared):
         if self.base_sampler == "DEMetropolisZ":
             stats = {**stats, **self.base_lambda_stats}
 
-        #if self.adaptive_error_correction:
-        #    self.adaptive_stats = {'mu_B': self.next_model.mu_B.get_value()[0]}
-        #    stats = {**stats, **self.adaptive_stats}
-
         return q_new, [stats]
+
+    def update_error_estimate(self, accepted, skipped_logp):
+        """Updates the adaptive error correction estimate with
+        the latest accepted forward model output difference. Also
+        updates the model variables mu_B and Sigma_B.
+
+        The current level estimates and stores the error
+        correction between the current level and the level below."""
+
+        # only save errors when a sample is accepted (excluding skipped_logp)
+        if accepted and not skipped_logp:
+            # this is the error (i.e. forward model output difference)
+            # between the current level's model and the model in the level below
+            self.last_synced_output_diff = self.model.model_output.get_value() - \
+                                           self.next_model.model_output.get_value()
+            self.adaptation_started = True
+        if self.adaptation_started:
+            # update the internal recursive bias estimator with the last saved error
+            self.bias.update(self.last_synced_output_diff)
+            # Update the model variables in the level below the current one.
+            # Each level has its own bias correction (i.e. bias object) that
+            # estimates the error between that level and the one below.
+            # The model variables mu_B and Signa_B of a level are the
+            # sum of the bias corrections of all levels below and including
+            # that level. This sum is updated here.
+            with self.next_model:
+                pm.set_data({'mu_B': sum([bias.get_mu() for bias in
+                                          self.bias_all[:len(self.bias_all) - self.num_levels + 2]])})
+                pm.set_data({'Sigma_B': sum([bias.get_sigma() for bias in
+                                             self.bias_all[:len(self.bias_all) - self.num_levels + 2]])})
 
     @staticmethod
     def competence(var, has_grad):
