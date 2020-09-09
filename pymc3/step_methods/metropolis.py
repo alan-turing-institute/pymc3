@@ -1369,13 +1369,13 @@ class MLDA(ArrayStepShared):
             r = np.random.randint(0, self.subsampling_rates[-1])
             if isinstance(self.next_step_method, CompoundStep):
                 if accepted and not skipped_logp:
-                    self.Q_diff_last = self.Q_last - Q_base[r]
-                #self.Q_diff.append(self.Q_last - Q_base[self.subsampling_rates[-1] - 1])
+                    #self.Q_diff_last = self.Q_last - Q_base[r]
+                    self.Q_diff_last = self.Q_last - Q_base[self.subsampling_rates[-1] - 1]
                 self.Q_random.append(Q_base[r])
             else:
                 if accepted and not skipped_logp:
-                    self.Q_diff_last = self.Q_last - self.next_step_method.Q_reg[r]
-                #self.Q_diff.append(self.Q_last - self.next_step_method.Q_reg[self.subsampling_rates[-1] - 1])
+                    #self.Q_diff_last = self.Q_last - self.next_step_method.Q_reg[r]
+                    self.Q_diff_last = self.Q_last - self.next_step_method.Q_reg[self.subsampling_rates[-1] - 1]
                 self.Q_random.append(self.next_step_method.Q_reg[r])
             self.Q_diff.append(self.Q_diff_last)
 
