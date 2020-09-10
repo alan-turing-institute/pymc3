@@ -972,8 +972,8 @@ class MLDA(ArrayStepShared):
         To flag to choose whether base sampler (level=0) is a
         Compound Metropolis step (base_blocked=False)
         or a blocked Metropolis step (base_blocked=True).
-    adaptive_error_correction : bool
-        When True, MLDA will use the adaptive error correction method
+    adaptive_error_model : bool
+        When True, MLDA will use the adaptive error model method
         proposed in [Cui2012]. The method requires the likelihood of
         the model to be adaptive and a forward model to be defined and
         fed to the sampler. Thus, it only works when the user does
@@ -1057,7 +1057,7 @@ class MLDA(ArrayStepShared):
                  tune=True, base_tune_target='lambda', base_tune_interval=100,
                  base_lamb=None, base_tune_drop_fraction=0.9, model=None, mode=None,
                  subsampling_rates=5, base_blocked=False,
-                 adaptive_error_correction=False, **kwargs):
+                 adaptive_error_model=False, **kwargs):
 
         warnings.warn(
             'The MLDA implementation in PyMC3 is very young. '
@@ -1078,22 +1078,22 @@ class MLDA(ArrayStepShared):
 
         self.next_model = self.coarse_models[-1]
         
-        self.adaptive_error_correction = adaptive_error_correction
+        self.adaptive_error_model = adaptive_error_model
 
         # check that certain requirements hold
-        # for adaptive error correction to work
-        if self.adaptive_error_correction:
+        # for the adaptive error model feature to work
+        if self.adaptive_error_model:
             if not hasattr(self.next_model, 'mu_B'):
                 raise AttributeError("Next model in hierarchy does not contain"
                                      "variable 'mu_B'. You need to include"
                                      "the variable in the model definition"
-                                     "for adaptive error correction to work."
+                                     "for adaptive error model to work."
                                      "Use pm.Data() to define it.")
             if not hasattr(self.next_model, 'Sigma_B'):
                 raise AttributeError("Next model in hierarchy does not contain"
                                      "variable 'Sigma_B'. You need to include"
                                      "the variable in the model definition"
-                                     "for adaptive error correction to work."
+                                     "for adaptive error model to work."
                                      "Use pm.Data() to define it.")
             if not (isinstance(self.next_model.mu_B, tt.sharedvar.TensorSharedVariable) and
                     isinstance(self.next_model.Sigma_B, tt.sharedvar.TensorSharedVariable)):
@@ -1117,7 +1117,7 @@ class MLDA(ArrayStepShared):
             else:
                 self.bias_all.append(self.bias)
 
-            # variables used for adaptive error correction
+            # variables used for adaptive error model
             self.last_synced_output_diff = None
             self.adaptation_started = False
 
@@ -1232,7 +1232,7 @@ class MLDA(ArrayStepShared):
                              if var.name in self.var_names]
 
                 # create kwargs
-                if self.adaptive_error_correction:
+                if self.adaptive_error_model:
                     mlda_kwargs = {"bias_all": self.bias_all}
                 else:
                     mlda_kwargs = kwargs
@@ -1251,7 +1251,7 @@ class MLDA(ArrayStepShared):
                                                 subsampling_rates=next_subsampling_rates,
                                                 coarse_models=next_coarse_models,
                                                 base_blocked=self.base_blocked,
-                                                adaptive_error_correction=self.adaptive_error_correction,
+                                                adaptive_error_model=self.adaptive_error_model,
                                                 **mlda_kwargs)
 
         # instantiate the recursive DA proposal.
@@ -1306,8 +1306,8 @@ class MLDA(ArrayStepShared):
         if skipped_logp:
             accepted = False
 
-        # Adaptive error correction - runs only during tuning.
-        if self.tune and self.adaptive_error_correction:
+        # Adaptive error model - runs only during tuning.
+        if self.tune and self.adaptive_error_model:
             self.update_error_estimate(accepted, skipped_logp)
 
         # Update acceptance counter
@@ -1346,12 +1346,12 @@ class MLDA(ArrayStepShared):
         return q_new, [stats]
 
     def update_error_estimate(self, accepted, skipped_logp):
-        """Updates the adaptive error correction estimate with
+        """Updates the adaptive error model estimate with
         the latest accepted forward model output difference. Also
         updates the model variables mu_B and Sigma_B.
 
         The current level estimates and stores the error
-        correction between the current level and the level below."""
+        model between the current level and the level below."""
 
         # only save errors when a sample is accepted (excluding skipped_logp)
         if accepted and not skipped_logp:
