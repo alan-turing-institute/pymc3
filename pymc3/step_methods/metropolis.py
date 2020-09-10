@@ -204,7 +204,6 @@ class Metropolis(ArrayStepShared):
         self.tune_interval = tune_interval
         self.steps_until_tune = tune_interval
         self.accepted = 0
-        self.acc_tune = 0
 
         # Determine type of variables
         self.discrete = np.concatenate(
@@ -227,10 +226,6 @@ class Metropolis(ArrayStepShared):
 
         shared = pm.make_shared_replacements(vars, model)
         self.delta_logp = delta_logp(model.logpt, vars, shared)
-        self.delta_logp_1 = delta_logp_1(model.logpt, vars, shared)
-        self.delta_logp_0 = delta_logp_0(model.logpt, vars, shared)
-        if self.is_mlda_base:
-            self.model = model
         super().__init__(vars, shared)
 
     def reset_tuning(self):
@@ -265,11 +260,8 @@ class Metropolis(ArrayStepShared):
             q = floatX(q0 + delta)
 
         accept = self.delta_logp(q, q0)
-
         q_new, accepted = metrop_select(accept, q, q0)
         self.accepted += accepted
-        if self.tune:
-            self.acc_tune += accepted
 
         self.steps_until_tune -= 1
 
@@ -803,7 +795,6 @@ class DEMetropolisZ(ArrayStepShared):
         self.tune_drop_fraction = tune_drop_fraction
         self.steps_until_tune = tune_interval
         self.accepted = 0
-        self.acc_tune = 0
 
         # cache local history for the Z-proposals
         self._history = []
@@ -825,10 +816,6 @@ class DEMetropolisZ(ArrayStepShared):
 
         shared = pm.make_shared_replacements(vars, model)
         self.delta_logp = delta_logp(model.logpt, vars, shared)
-        self.delta_logp_1 = delta_logp_1(model.logpt, vars, shared)
-        self.delta_logp_0 = delta_logp_0(model.logpt, vars, shared)
-        if self.is_mlda_base:
-            self.model = model
         super().__init__(vars, shared)
 
     def reset_tuning(self):
@@ -878,9 +865,6 @@ class DEMetropolisZ(ArrayStepShared):
         self.accepted += accepted
         self._history.append(q_new)
         self.steps_until_tune -= 1
-
-        if self.tune:
-            self.acc_tune += accepted
 
         stats = {
             'tune': self.tune,
@@ -1084,7 +1068,6 @@ class MLDA(ArrayStepShared):
 
         # assign internal state
         self.coarse_models = coarse_models
-
         if not isinstance(coarse_models, list):
             raise ValueError("MLDA step method cannot use "
                              "coarse_models if it is not a list")
@@ -1169,14 +1152,11 @@ class MLDA(ArrayStepShared):
         self.base_tune_interval = base_tune_interval
         self.base_lamb = base_lamb
         self.base_tune_drop_fraction = float(base_tune_drop_fraction)
-        self.model = model
         self.mode = mode
         self.base_blocked = base_blocked
         self.base_scaling_stats = None
         if self.base_sampler == 'DEMetropolisZ':
             self.base_lambda_stats = None
-        if self.adaptive_error_correction:
-            self.adaptive_stats = None
 
         # Process model variables
         if vars is None:
@@ -1402,7 +1382,7 @@ class MLDA(ArrayStepShared):
         if var.dtype in pm.discrete_types:
             return Competence.INCOMPATIBLE
         return Competence.COMPATIBLE
-                
+
 
 class RecursiveSampleMoments:
     """
@@ -1478,29 +1458,5 @@ def delta_logp_inverse(logp, vars, shared):
     logp1 = pm.CallableTensor(logp0)(inarray1)
 
     f = theano.function([inarray1, inarray0], - logp0 + logp1)
-    f.trust_input = True
-    return f
-
-def delta_logp_1(logp, vars, shared):
-    [logp0], inarray0 = pm.join_nonshared_inputs([logp], vars, shared)
-
-    tensor_type = inarray0.type
-    inarray1 = tensor_type('inarray1')
-
-    logp1 = pm.CallableTensor(logp0)(inarray1)
-
-    f = theano.function([inarray1], logp1)
-    f.trust_input = True
-    return f
-
-def delta_logp_0(logp, vars, shared):
-    [logp0], inarray0 = pm.join_nonshared_inputs([logp], vars, shared)
-
-    tensor_type = inarray0.type
-    inarray1 = tensor_type('inarray1')
-
-    logp1 = pm.CallableTensor(logp0)(inarray1)
-
-    f = theano.function([inarray0], logp0)
     f.trust_input = True
     return f
