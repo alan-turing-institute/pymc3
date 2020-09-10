@@ -1454,7 +1454,10 @@ class TestMLDA:
 
         with Model() as coarse_model_0:
             mu_B = Data('mu_B', np.zeros(y.shape))
-            bias = Data('bias', 3.5 * np.ones(y.shape))
+            if theano.config.floatX == "float32":
+                bias = Data('bias', 3.5 * np.ones(y.shape, dtype="float32"))
+            else:
+                bias = Data('bias', 3.5 * np.ones(y.shape, dtype="float64"))
             Sigma_B = Data('Sigma_B', np.zeros((y.shape[0], y.shape[0])))
             model_output = Data('model_output', np.zeros(y.shape))
             Sigma_e = Data('Sigma_e', s)
@@ -1477,7 +1480,10 @@ class TestMLDA:
 
         with Model() as coarse_model_1:
             mu_B = Data('mu_B', np.zeros(y.shape))
-            bias = Data('bias', 2.2 * np.ones(y.shape))
+            if theano.config.floatX == "float32":
+                bias = Data('bias', 2.2 * np.ones(y.shape, dtype="float32"))
+            else:
+                bias = Data('bias', 2.2 * np.ones(y.shape, dtype="float64"))
             Sigma_B = Data('Sigma_B', np.zeros((y.shape[0], y.shape[0])))
             model_output = Data('model_output', np.zeros(y.shape))
             Sigma_e = Data('Sigma_e', s)
@@ -1500,7 +1506,10 @@ class TestMLDA:
 
         # fine model and inference
         with Model() as model:
-            bias = Data('bias', np.zeros(y.shape))
+            if theano.config.floatX == "float32":
+                bias = Data('bias', np.zeros(y.shape, dtype="float32"))
+            else:
+                bias = Data('bias', np.zeros(y.shape, dtype="float64"))
             model_output = Data('model_output', np.zeros(y.shape))
             Sigma_e = Data('Sigma_e', s)
 
