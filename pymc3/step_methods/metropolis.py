@@ -995,7 +995,7 @@ class MLDA(ArrayStepShared):
             equal to the model error plus Sigma_B.
         Given the above, MLDA will capture and iteratively update the
         bias terms internally for all level pairs and will correct
-        each level so that the all levels' forward models estimate
+        each level so that all levels' forward models aim to estimate
         the finest level's forward model.
 
     Examples
