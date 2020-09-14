@@ -25,6 +25,8 @@ from .compound import CompoundStep
 import pymc3 as pm
 from pymc3.theanof import floatX
 
+import theano.tensor as tt
+
 __all__ = ['Metropolis', 'DEMetropolis', 'DEMetropolisZ', 'BinaryMetropolis', 'BinaryGibbsMetropolis',
            'CategoricalGibbsMetropolis', 'UniformProposal', 'NormalProposal', 'CauchyProposal',
            'LaplaceProposal', 'PoissonProposal', 'MultivariateNormalProposal',
@@ -114,7 +116,7 @@ class RecursiveDAProposal(Proposal):
             # to False (by MLDA's astep) when the burn-in
             # iterations of the highest-level MLDA sampler run out.
             # The change propagates to all levels.
-                                   
+
             if self.tune:
                 # Subsample in tuning mode
                 self.trace = pm.subsample(draws=0, step=self.next_step_method,
@@ -774,7 +776,7 @@ class DEMetropolisZ(ArrayStepShared):
 
         if S is None:
             S = np.ones(model.ndim)
-        
+
         if proposal_dist is not None:
             self.proposal_dist = proposal_dist(S)
         else:
@@ -849,7 +851,7 @@ class DEMetropolisZ(ArrayStepShared):
             iz2 = np.random.randint(it)
             while iz2 == iz1:
                 iz2 = np.random.randint(it)
-            
+
             z1 = self._history[iz1]
             z2 = self._history[iz2]
             # propose a jump
@@ -970,6 +972,31 @@ class MLDA(ArrayStepShared):
         To flag to choose whether base sampler (level=0) is a
         Compound Metropolis step (base_blocked=False)
         or a blocked Metropolis step (base_blocked=True).
+    adaptive_error_model : bool
+        When True, MLDA will use the adaptive error model method
+        proposed in [Cui2012]. The method requires the likelihood of
+        the model to be adaptive and a forward model to be defined and
+        fed to the sampler. Thus, it only works when the user does
+        the following (also demonstrated in the example notebook):
+            - Include in the model definition at all levels,
+            the extra variable model_output, which will capture
+            the forward model outputs. Also include in the model
+            definition at all levels except the finest one, the
+            extra variables mu_B and Sigma_B, which will capture
+            the bias between different levels. All these variables
+            should be instantiated using the pm.Data method.
+            - Use a Theano Op to define the forward model (and
+            optionally the likelihood) for all levels. The Op needs
+            to store the result of each forward model calculation
+            to the variable model_output of the PyMC3 model.
+            - Define a Multivariate Normal likelihood (either using
+            the standard PyMC3 API or within an Op) which has mean
+            equal to the forward model output plus mu_B and covariance
+            equal to the model error plus Sigma_B.
+        Given the above, MLDA will capture and iteratively update the
+        bias terms internally for all level pairs and will correct
+        each level so that all levels' forward models aim to estimate
+        the finest level's forward model.
 
     Examples
     ----------
@@ -1006,6 +1033,9 @@ class MLDA(ArrayStepShared):
     Multilevel Markov Chain Monte Carlo.
     SIAM Review. 61. 509-545.
         `link <https://doi.org/10.1137/19M126966X>`__
+    .. [Cui2012] Cui, Tiangang & Fox, Colin & O'Sullivan, Michael.
+    (2012). Adaptive Error Modelling in MCMC Sampling for Large
+    Scale Inverse Problems.
     """
     name = 'mlda'
 
@@ -1026,7 +1056,8 @@ class MLDA(ArrayStepShared):
                  base_S=None, base_proposal_dist=None, base_scaling=None,
                  tune=True, base_tune_target='lambda', base_tune_interval=100,
                  base_lamb=None, base_tune_drop_fraction=0.9, model=None, mode=None,
-                 subsampling_rates=5, base_blocked=False, **kwargs):
+                 subsampling_rates=5, base_blocked=False,
+                 adaptive_error_model=False, **kwargs):
 
         warnings.warn(
             'The MLDA implementation in PyMC3 is very young. '
@@ -1044,6 +1075,52 @@ class MLDA(ArrayStepShared):
             raise ValueError("MLDA step method was given an empty "
                              "list of coarse models. Give at least "
                              "one coarse model.")
+
+        self.next_model = self.coarse_models[-1]
+        
+        self.adaptive_error_model = adaptive_error_model
+
+        # check that certain requirements hold
+        # for the adaptive error model feature to work
+        if self.adaptive_error_model:
+            if not hasattr(self.next_model, 'mu_B'):
+                raise AttributeError("Next model in hierarchy does not contain"
+                                     "variable 'mu_B'. You need to include"
+                                     "the variable in the model definition"
+                                     "for adaptive error model to work."
+                                     "Use pm.Data() to define it.")
+            if not hasattr(self.next_model, 'Sigma_B'):
+                raise AttributeError("Next model in hierarchy does not contain"
+                                     "variable 'Sigma_B'. You need to include"
+                                     "the variable in the model definition"
+                                     "for adaptive error model to work."
+                                     "Use pm.Data() to define it.")
+            if not (isinstance(self.next_model.mu_B, tt.sharedvar.TensorSharedVariable) and
+                    isinstance(self.next_model.Sigma_B, tt.sharedvar.TensorSharedVariable)):
+                raise TypeError("At least one of the variables 'mu_B' and 'Sigma_B' "
+                                "in the next model's definition is not of type "
+                                "'TensorSharedVariable'. Use pm.Data() to define those "
+                                "variables.")
+
+            # this object is used to recursively update the mean and
+            # variance of the bias correction given new differences
+            # between levels
+            self.bias = RecursiveSampleMoments(self.next_model.mu_B.get_value(),
+                                               self.next_model.Sigma_B.get_value())
+            
+            # this list holds the bias objects from all levels
+            # it is gradually constructed when MLDA objects are
+            # created and then shared between all levels
+            self.bias_all = kwargs.pop("bias_all", None)
+            if self.bias_all is None:
+                self.bias_all = [self.bias]
+            else:
+                self.bias_all.append(self.bias)
+
+            # variables used for adaptive error model
+            self.last_synced_output_diff = None
+            self.adaptation_started = False
+
         if isinstance(subsampling_rates, int):
             self.subsampling_rates = [subsampling_rates] * len(self.coarse_models)
         else:
@@ -1075,8 +1152,6 @@ class MLDA(ArrayStepShared):
         self.base_tune_interval = base_tune_interval
         self.base_lamb = base_lamb
         self.base_tune_drop_fraction = float(base_tune_drop_fraction)
-        self.model = model
-        self.next_model = self.coarse_models[-1]
         self.mode = mode
         self.base_blocked = base_blocked
         self.base_scaling_stats = None
@@ -1096,9 +1171,9 @@ class MLDA(ArrayStepShared):
         # (for use in acceptance)
         shared = pm.make_shared_replacements(vars,
                                              model)
-        self.delta_logp = delta_logp(model.logpt,
-                                     vars,
-                                     shared)
+        self.delta_logp = delta_logp_inverse(model.logpt,
+                                             vars,
+                                             shared)
 
         # Construct theano function for next-level model likelihood
         # (for use in acceptance)
@@ -1110,7 +1185,7 @@ class MLDA(ArrayStepShared):
         self.delta_logp_next = delta_logp(next_model.logpt,
                                           vars_next,
                                           shared_next)
-
+        self.model = model
         super().__init__(vars, shared)
 
         # initialise complete step method hierarchy
@@ -1155,6 +1230,13 @@ class MLDA(ArrayStepShared):
                 # make sure the correct variables are selected from next_model
                 vars_next = [var for var in self.next_model.vars
                              if var.name in self.var_names]
+
+                # create kwargs
+                if self.adaptive_error_model:
+                    mlda_kwargs = {"bias_all": self.bias_all}
+                else:
+                    mlda_kwargs = kwargs
+
                 # MLDA sampler in some intermediate level, targeting self.next_model
                 self.next_step_method = pm.MLDA(vars=vars_next, base_S=self.base_S,
                                                 base_sampler=self.base_sampler,
@@ -1169,7 +1251,8 @@ class MLDA(ArrayStepShared):
                                                 subsampling_rates=next_subsampling_rates,
                                                 coarse_models=next_coarse_models,
                                                 base_blocked=self.base_blocked,
-                                                **kwargs)
+                                                adaptive_error_model=self.adaptive_error_model,
+                                                **mlda_kwargs)
 
         # instantiate the recursive DA proposal.
         # this is the main proposal used for
@@ -1223,6 +1306,10 @@ class MLDA(ArrayStepShared):
         if skipped_logp:
             accepted = False
 
+        # Adaptive error model - runs only during tuning.
+        if self.tune and self.adaptive_error_model:
+            self.update_error_estimate(accepted, skipped_logp)
+
         # Update acceptance counter
         self.accepted += accepted
 
@@ -1258,6 +1345,36 @@ class MLDA(ArrayStepShared):
 
         return q_new, [stats]
 
+    def update_error_estimate(self, accepted, skipped_logp):
+        """Updates the adaptive error model estimate with
+        the latest accepted forward model output difference. Also
+        updates the model variables mu_B and Sigma_B.
+
+        The current level estimates and stores the error
+        model between the current level and the level below."""
+
+        # only save errors when a sample is accepted (excluding skipped_logp)
+        if accepted and not skipped_logp:
+            # this is the error (i.e. forward model output difference)
+            # between the current level's model and the model in the level below
+            self.last_synced_output_diff = self.model.model_output.get_value() - \
+                                           self.next_model.model_output.get_value()
+            self.adaptation_started = True
+        if self.adaptation_started:
+            # update the internal recursive bias estimator with the last saved error
+            self.bias.update(self.last_synced_output_diff)
+            # Update the model variables in the level below the current one.
+            # Each level has its own bias correction (i.e. bias object) that
+            # estimates the error between that level and the one below.
+            # The model variables mu_B and Signa_B of a level are the
+            # sum of the bias corrections of all levels below and including
+            # that level. This sum is updated here.
+            with self.next_model:
+                pm.set_data({'mu_B': sum([bias.get_mu() for bias in
+                                          self.bias_all[:len(self.bias_all) - self.num_levels + 2]])})
+                pm.set_data({'Sigma_B': sum([bias.get_sigma() for bias in
+                                             self.bias_all[:len(self.bias_all) - self.num_levels + 2]])})
+
     @staticmethod
     def competence(var, has_grad):
         """Return MLDA competence for given var/has_grad. MLDA currently works
@@ -1265,6 +1382,46 @@ class MLDA(ArrayStepShared):
         if var.dtype in pm.discrete_types:
             return Competence.INCOMPATIBLE
         return Competence.COMPATIBLE
+
+
+class RecursiveSampleMoments:
+    """
+    Iteratively constructs a sample mean
+    and covariance, given input samples.
+
+    Used to capture an estimate of the mean
+    and covariance of the bias of an MLDA
+    coarse model.
+    """
+    def __init__(self, mu_0, sigma_0, t=1):
+        self.mu = mu_0
+        self.sigma = sigma_0
+        self.t = t
+        
+    def __call__(self):
+        return self.mu, self.sigma
+
+    def get_mu(self):
+        """Returns the current mu value"""
+        return self.mu
+        
+    def get_sigma(self):
+        """Returns the current covariance value"""
+        return self.sigma
+
+    def update(self, x):
+        """Updates the mean and covariance given a
+        new sample x"""
+        mu_previous = self.mu.copy()
+        
+        self.mu = (1 / (self.t + 1)) * (self.t * mu_previous + x)
+        
+        self.sigma = (self.t - 1) / self.t * self.sigma + 1 / self.t * \
+                     (self.t * np.outer(mu_previous, mu_previous) -
+                     (self.t + 1) * np.outer(self.mu, self.mu) +
+                     np.outer(x, x))
+        
+        self.t += 1
 
 
 def sample_except(limit, excluded):
@@ -1288,5 +1445,18 @@ def delta_logp(logp, vars, shared):
     logp1 = pm.CallableTensor(logp0)(inarray1)
 
     f = theano.function([inarray1, inarray0], logp1 - logp0)
+    f.trust_input = True
+    return f
+
+
+def delta_logp_inverse(logp, vars, shared):
+    [logp0], inarray0 = pm.join_nonshared_inputs([logp], vars, shared)
+
+    tensor_type = inarray0.type
+    inarray1 = tensor_type('inarray1')
+
+    logp1 = pm.CallableTensor(logp0)(inarray1)
+
+    f = theano.function([inarray1, inarray0], - logp0 + logp1)
     f.trust_input = True
     return f
