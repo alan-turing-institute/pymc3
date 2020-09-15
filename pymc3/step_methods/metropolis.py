@@ -116,7 +116,7 @@ class RecursiveDAProposal(Proposal):
             # to False (by MLDA's astep) when the burn-in
             # iterations of the highest-level MLDA sampler run out.
             # The change propagates to all levels.
-                                   
+
             if self.tune:
                 # Subsample in tuning mode
                 self.trace = pm.subsample(draws=0, step=self.next_step_method,
@@ -225,7 +225,7 @@ class Metropolis(ArrayStepShared):
         self.is_mlda_base = kwargs.pop("is_mlda_base", False)
 
         # flag to indicate this stepper was instantiated within an MLDA stepper
-        # and variance reduction is activated - forces Metropolis to temparirily store
+        # and variance reduction is activated - forces Metropolis to store
         # quantities of interest in a register if True
         self.mlda_variance_reduction = kwargs.pop("mlda_variance_reduction", False)
 
@@ -802,7 +802,7 @@ class DEMetropolisZ(ArrayStepShared):
 
         if S is None:
             S = np.ones(model.ndim)
-        
+
         if proposal_dist is not None:
             self.proposal_dist = proposal_dist(S)
         else:
@@ -895,7 +895,7 @@ class DEMetropolisZ(ArrayStepShared):
             iz2 = np.random.randint(it)
             while iz2 == iz1:
                 iz2 = np.random.randint(it)
-            
+
             z1 = self._history[iz1]
             z2 = self._history[iz2]
             # propose a jump
@@ -1110,6 +1110,8 @@ class MLDA(ArrayStepShared):
         self.model = model
         self.variance_reduction = variance_reduction
         self.store_Q_fine = store_Q_fine
+        # check that certain requirements hold
+        # for the variance reduction feature to work
         if self.variance_reduction or self.store_Q_fine:
             if not hasattr(self.model, 'Q'):
                 raise AttributeError("Model given to MLDA does not contain"
@@ -1132,8 +1134,12 @@ class MLDA(ArrayStepShared):
                                  f"were {len(subsampling_rates)}, {len(self.coarse_models)}")
             self.subsampling_rates = subsampling_rates
 
+        # this variable is used to identify MLDA objects which are
+        # not in the finest level (i.e. child MLDA objects)
         self.is_child = kwargs.get("is_child", False)
         if self.is_child:
+            # this is the subsampling rate applied to the current level
+            # it is stored in the level above and transferred here
             self.subsampling_rate_above = kwargs.get("subsampling_rate_above", None)
         self.num_levels = len(self.coarse_models) + 1
         self.base_sampler = base_sampler
@@ -1344,30 +1350,8 @@ class MLDA(ArrayStepShared):
         if skipped_logp:
             accepted = False
 
-        if self.variance_reduction or self.store_Q_fine:
-            if accepted and not skipped_logp:
-                self.Q_last = self.model.Q.get_value()
-
-        if self.variance_reduction:
-            if self.is_child:
-                if self.sub_counter == self.subsampling_rate_above:
-                    self.sub_counter = 0
-                self.Q_reg[self.sub_counter] = self.Q_last
-                self.sub_counter += 1
-
-            if self.num_levels == 2:
-                if isinstance(self.next_step_method, CompoundStep):
-                    Q_base = self.extract_Q_base()
-                    self.Q_base_full.extend(Q_base)
-                else:
-                    self.Q_base_full.extend(self.next_step_method.Q_reg)
-
-            if accepted and not skipped_logp:
-                if isinstance(self.next_step_method, CompoundStep):
-                    self.Q_diff_last = self.Q_last - Q_base[self.subsampling_rates[-1] - 1]
-                else:
-                    self.Q_diff_last = self.Q_last - self.next_step_method.Q_reg[self.subsampling_rates[-1] - 1]
-            self.Q_diff.append(self.Q_diff_last)
+        # Variance reduction
+        self.update_vr_variables(accepted, skipped_logp)
 
         # Update acceptance counter
         self.accepted += accepted
@@ -1402,12 +1386,17 @@ class MLDA(ArrayStepShared):
         if self.base_sampler == "DEMetropolisZ":
             stats = {**stats, **self.base_lambda_stats}
 
+        # Save the VR statistics to the stats dictionary (only happens in the
+        # top MLDA level)
         if (self.variance_reduction or self.store_Q_fine) and not self.is_child:
             q_stats = {}
             if self.variance_reduction:
                 m = self
                 for level in range(self.num_levels - 1, 0, -1):
+                    # save the Q differences for this level and iteration
                     q_stats[f'Q_{level}_{level - 1}'] = np.array(m.Q_diff)
+                    # this makes sure Q_diff is reset for
+                    # the next iteration
                     m.Q_diff = []
                     if level == 1:
                         break
@@ -1420,9 +1409,61 @@ class MLDA(ArrayStepShared):
 
         return q_new, [stats]
 
+    def update_vr_variables(self, accepted, skipped_logp):
+        """Updates all the variables necessary for VR to work.
+
+        Each level has a Q_last and Q_diff_last register which store
+        the Q of the last accepted MCMC sample and the difference
+        between the Q of the last accepted sample in this level and
+        the Q of the last sample in the level below.
+
+        These registers are updated here so that they can be exported later."""
+
+        # if sample is accepted, update self.Q_last with the sample's Q value
+        # runs only for VR or when store_Q_fine is True
+        if self.variance_reduction or self.store_Q_fine:
+            if accepted and not skipped_logp:
+                self.Q_last = self.model.Q.get_value()
+
+        if self.variance_reduction:
+            # if this MLDA is not at the finest level, store Q_last in a
+            # register Q_reg and increase sub_counter (until you reach
+            # the subsampling rate, at which point you make it zero)
+            # Q_reg will later be used by the level above to calculate differences
+            if self.is_child:
+                if self.sub_counter == self.subsampling_rate_above:
+                    self.sub_counter = 0
+                self.Q_reg[self.sub_counter] = self.Q_last
+                self.sub_counter += 1
+
+            # if MLDA is in the level above the base level, extract the
+            # latest set of Q values and store them in Q_base. Also add them
+            # to the list Q_base_full which stores all the history of Q values from
+            # the base level. extract_Q_base is used when the base level
+            # sampler is a compound method, which requires special extraction
+            if self.num_levels == 2:
+                if isinstance(self.next_step_method, CompoundStep):
+                    Q_base = self.extract_Q_base()
+                    self.Q_base_full.extend(Q_base)
+                else:
+                    self.Q_base_full.extend(self.next_step_method.Q_reg)
+
+            # if the sample is accepted, update Q_diff_last with the latest
+            # difference between the Q of this level and the last Q of the
+            # level below. If sample is not accepted, just keep the latest
+            # accepted Q_diff
+            if accepted and not skipped_logp:
+                if isinstance(self.next_step_method, CompoundStep):
+                    self.Q_diff_last = self.Q_last - Q_base[self.subsampling_rates[-1] - 1]
+                else:
+                    self.Q_diff_last = self.Q_last - self.next_step_method.Q_reg[self.subsampling_rates[-1] - 1]
+            # Add the last accepted Q_diff to the list
+            self.Q_diff.append(self.Q_diff_last)
+
     def extract_Q_base(self):
-        """Construct and return quantities of interest register from from base level Compound method
-        It picks and returns only the last quantity of interest in each complete Compound iteration."""
+        """Construct and return quantities of interest register from from base level
+        Compound method. It picks and returns only the last quantity of interest in
+        each complete Compound iteration."""
         Q_base = [np.nan] * self.subsampling_rates[-1]
         for i in range(self.subsampling_rates[-1]):
             if self.next_step_method.methods[-1].acceptance_reg[i]:
