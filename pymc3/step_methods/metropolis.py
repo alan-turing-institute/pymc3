@@ -277,7 +277,6 @@ class Metropolis(ArrayStepShared):
             q = floatX(q0 + delta)
 
         accept = self.delta_logp(q, q0)
-
         q_new, accepted = metrop_select(accept, q, q0)
         self.accepted += accepted
 
@@ -1028,9 +1027,9 @@ class MLDA(ArrayStepShared):
         Compound Metropolis step (base_blocked=False)
         or a blocked Metropolis step (base_blocked=True).
     variance_reduction: bool
-        Store all the necessary quantities of interest and quantity differences
-        to enable computing a telescoping sum of the quantity of interest after
-        sampling.
+        Calculate and store quantities of interest and quantity of interest
+        differences between levels to enable computing a variance-reduced
+        sum of the quantity of interest after sampling.
     store_Q_fine: bool
         Store the values of the quantity of interest from the fine chain.
 
@@ -1163,7 +1162,6 @@ class MLDA(ArrayStepShared):
         self.mode = mode
         self.base_blocked = base_blocked
         self.base_scaling_stats = None
-
         if self.base_sampler == 'DEMetropolisZ':
             self.base_lambda_stats = None
 
@@ -1292,7 +1290,6 @@ class MLDA(ArrayStepShared):
         if self.variance_reduction:
             self.sub_counter = 0
             self.Q_diff = []
-            self.Q_random = []
             if self.is_child:
                 self.Q_reg = [np.nan] * self.subsampling_rate_above
             if self.num_levels == 2:
@@ -1300,7 +1297,6 @@ class MLDA(ArrayStepShared):
             if not self.is_child:
                 for level in range(self.num_levels - 1, 0, -1):
                     self.stats_dtypes[0][f'Q_{level}_{level - 1}'] = object
-                    self.stats_dtypes[0][f'Q_{level - 1}_random'] = object
                 self.stats_dtypes[0]['Q_0'] = object
 
         # initialise necessary variables for doing variance reduction or storing fine Q
@@ -1366,17 +1362,11 @@ class MLDA(ArrayStepShared):
                 else:
                     self.Q_base_full.extend(self.next_step_method.Q_reg)
 
-            r = np.random.randint(0, self.subsampling_rates[-1])
-            if isinstance(self.next_step_method, CompoundStep):
-                if accepted and not skipped_logp:
-                    #self.Q_diff_last = self.Q_last - Q_base[r]
+            if accepted and not skipped_logp:
+                if isinstance(self.next_step_method, CompoundStep):
                     self.Q_diff_last = self.Q_last - Q_base[self.subsampling_rates[-1] - 1]
-                self.Q_random.append(Q_base[r])
-            else:
-                if accepted and not skipped_logp:
-                    #self.Q_diff_last = self.Q_last - self.next_step_method.Q_reg[r]
+                else:
                     self.Q_diff_last = self.Q_last - self.next_step_method.Q_reg[self.subsampling_rates[-1] - 1]
-                self.Q_random.append(self.next_step_method.Q_reg[r])
             self.Q_diff.append(self.Q_diff_last)
 
         # Update acceptance counter
@@ -1419,8 +1409,6 @@ class MLDA(ArrayStepShared):
                 for level in range(self.num_levels - 1, 0, -1):
                     q_stats[f'Q_{level}_{level - 1}'] = np.array(m.Q_diff)
                     m.Q_diff = []
-                    q_stats[f'Q_{level - 1}_random'] = np.array(m.Q_random)
-                    m.Q_random = []
                     if level == 1:
                         break
                     m = m.next_step_method
