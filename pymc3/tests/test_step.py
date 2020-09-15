@@ -1438,8 +1438,12 @@ class TestMLDA:
 
         # define two theano ops with different quantities of interest
         class ForwardModel1(tt.Op):
-            itypes = [tt.dvector]
-            otypes = [tt.dvector]
+            if theano.config.floatX == "float32":
+                itypes = [tt.fvector]
+                otypes = [tt.fvector]
+            else:
+                itypes = [tt.dvector]
+                otypes = [tt.dvector]
 
             def __init__(self, x, pymc3_model):
                 self.x = x
