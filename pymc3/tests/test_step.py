@@ -1471,10 +1471,8 @@ class TestMLDA:
 
             mout.append(ForwardModel(x, coarse_model_0))
 
-            output = Potential('output', mout[0](theta))
-
             # Define likelihood
-            likelihood = MvNormal('y', mu=output + mu_B,
+            likelihood = MvNormal('y', mu=mout[0](theta) + mu_B,
                                   cov=Sigma_e, observed=y)
 
             coarse_models.append(coarse_model_0)
@@ -1494,10 +1492,8 @@ class TestMLDA:
 
             mout.append(ForwardModel(x, coarse_model_1))
 
-            output = Potential('output', mout[1](theta))
-
             # Define likelihood
-            likelihood = MvNormal('y', mu=output + mu_B,
+            likelihood = MvNormal('y', mu=mout[1](theta) + mu_B,
                                   cov=Sigma_e, observed=y)
 
             coarse_models.append(coarse_model_1)
@@ -1516,10 +1512,8 @@ class TestMLDA:
 
             mout.append(ForwardModel(x, model))
 
-            output = Potential('output', mout[-1](theta))
-
             # Define likelihood
-            likelihood = MvNormal('y', mu=output,
+            likelihood = MvNormal('y', mu=mout[-1](theta),
                                   cov=Sigma_e, observed=y)
 
             step_mlda = MLDA(coarse_models=coarse_models,
