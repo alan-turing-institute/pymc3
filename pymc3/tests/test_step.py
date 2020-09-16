@@ -1465,9 +1465,9 @@ class TestMLDA:
                 intercept = inputs[0][0]
                 x_coeff = inputs[0][1]
 
-                temp = intercept + x_coeff * self.x
-                self.pymc3_model.Q.set_value(x_coeff)
-                outputs[0][0] = np.array(- (0.5 / s ** 2) * np.sum((temp - self.y) ** 2))
+                temp = np.array(intercept + x_coeff * self.x, dtype=p)
+                self.pymc3_model.Q.set_value(np.array(x_coeff, dtype=p))
+                outputs[0][0] = np.array(- (0.5 / s ** 2) * np.sum((temp - self.y) ** 2, dtype=p), dtype=p)
 
         class Likelihood2(tt.Op):
             if theano.config.floatX == "float32":
@@ -1486,9 +1486,9 @@ class TestMLDA:
                 intercept = inputs[0][0]
                 x_coeff = inputs[0][1]
 
-                temp = intercept + x_coeff * self.x
-                self.pymc3_model.Q.set_value(temp.mean())
-                outputs[0][0] = np.array(- (0.5 / s ** 2) * np.sum((temp - self.y) ** 2))
+                temp = np.array(intercept + x_coeff * self.x, dtype=p)
+                self.pymc3_model.Q.set_value(temp.mean(dtype=p))
+                outputs[0][0] = np.array(- (0.5 / s ** 2) * np.sum((temp - self.y) ** 2, dtype=p), dtype=p)
 
         # run four MLDA steppers for all combinations of
         # base_sampler and forward model
@@ -1498,7 +1498,10 @@ class TestMLDA:
                 coarse_models = []
 
                 with Model() as coarse_model_0:
-                    Q = Data('Q', np.float(0.0))
+                    if theano.config.floatX == "float32":
+                        Q = Data('Q', np.float32(0.0))
+                    else:
+                        Q = Data('Q', np.float64(0.0))
 
                     # Define priors
                     intercept = Normal('Intercept', 0, sigma=20)
@@ -1512,7 +1515,10 @@ class TestMLDA:
                     coarse_models.append(coarse_model_0)
 
                 with Model() as coarse_model_1:
-                    Q = Data('Q', np.float(0.0))
+                    if theano.config.floatX == "float32":
+                        Q = Data('Q', np.float32(0.0))
+                    else:
+                        Q = Data('Q', np.float64(0.0))
 
                     # Define priors
                     intercept = Normal('Intercept', 0, sigma=20)
@@ -1526,7 +1532,10 @@ class TestMLDA:
                     coarse_models.append(coarse_model_1)
 
                 with Model() as model:
-                    Q = Data('Q', np.float(0.0))
+                    if theano.config.floatX == "float32":
+                        Q = Data('Q', np.float32(0.0))
+                    else:
+                        Q = Data('Q', np.float64(0.0))
 
                     # Define priors
                     intercept = Normal('Intercept', 0, sigma=20)
