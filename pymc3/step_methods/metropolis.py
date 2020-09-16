@@ -1300,6 +1300,7 @@ class MLDA(ArrayStepShared):
                 self.Q_reg = [np.nan] * self.subsampling_rate_above
             if self.num_levels == 2:
                 self.Q_base_full = []
+                self.Q_base_from_previous_batch = np.nan
             if not self.is_child:
                 for level in range(self.num_levels - 1, 0, -1):
                     self.stats_dtypes[0][f'Q_{level}_{level - 1}'] = object
@@ -1454,14 +1455,14 @@ class MLDA(ArrayStepShared):
             # accepted Q_diff
             if accepted and not skipped_logp:
                 if isinstance(self.next_step_method, CompoundStep):
-                    self.Q_diff_last = self.Q_last - Q_base[self.subsampling_rates[-1] - 1]
+                    self.Q_diff_last = self.Q_last - self.next_step_method.methods[-1].Q_reg[self.subsampling_rates[-1] - 1]#Q_base[self.subsampling_rates[-1] - 1]
                 else:
                     self.Q_diff_last = self.Q_last - self.next_step_method.Q_reg[self.subsampling_rates[-1] - 1]
             # Add the last accepted Q_diff to the list
             self.Q_diff.append(self.Q_diff_last)
 
     def extract_Q_base(self):
-        """Construct and return quantities of interest register from from base level
+        """Construct and return the quantity of interest register from from base level
         Compound method. It picks and returns only the last quantity of interest in
         each complete Compound iteration."""
         Q_base = [np.nan] * self.subsampling_rates[-1]
@@ -1471,9 +1472,14 @@ class MLDA(ArrayStepShared):
             else:
                 try:
                     last_accepted_index = max([d for d, m in enumerate(self.next_step_method.methods) if m.acceptance_reg[i]])
+                    Q_base[i] = self.next_step_method.methods[last_accepted_index].Q_reg[i]
                 except ValueError:
-                    last_accepted_index = len(self.next_step_method.methods) - 1
-                Q_base[i] = self.next_step_method.methods[last_accepted_index].Q_reg[i]
+                    # last_accepted_index = len(self.next_step_method.methods) - 1
+                    if i > 0:
+                        Q_base[i] = Q_base[i-1]
+                    else:
+                        Q_base[i] = self.Q_base_from_previous_batch
+        self.Q_base_from_previous_batch = Q_base[-1]
         return Q_base
 
     @staticmethod
