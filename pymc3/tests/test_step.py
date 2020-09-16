@@ -48,7 +48,7 @@ from pymc3.step_methods import (
     MLDA
 )
 from pymc3.theanof import floatX
-from pymc3.distributions import Binomial, Normal, Bernoulli, Categorical, Beta, HalfNormal, MvNormal
+from pymc3.distributions import Binomial, Normal, Bernoulli, Categorical, Beta, HalfNormal
 from pymc3.data import Data
 
 from numpy.testing import assert_array_almost_equal
