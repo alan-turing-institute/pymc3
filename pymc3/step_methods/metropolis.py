@@ -1091,10 +1091,14 @@ class MLDA(ArrayStepShared):
                  subsampling_rates=5, base_blocked=False, variance_reduction=False,
                  store_Q_fine=False, **kwargs):
 
-        warnings.warn(
-            'The MLDA implementation in PyMC3 is very young. '
-            'You should be extra critical about its results.'
-        )
+        # this variable is used to identify MLDA objects which are
+        # not in the finest level (i.e. child MLDA objects)
+        self.is_child = kwargs.get("is_child", False)
+        if not self.is_child:
+            warnings.warn(
+                'The MLDA implementation in PyMC3 is very young. '
+                'You should be extra critical about its results.'
+            )
 
         model = pm.modelcontext(model)
 
@@ -1110,6 +1114,7 @@ class MLDA(ArrayStepShared):
         self.model = model
         self.variance_reduction = variance_reduction
         self.store_Q_fine = store_Q_fine
+
         # check that certain requirements hold
         # for the variance reduction feature to work
         if self.variance_reduction or self.store_Q_fine:
@@ -1134,15 +1139,23 @@ class MLDA(ArrayStepShared):
                                  f"were {len(subsampling_rates)}, {len(self.coarse_models)}")
             self.subsampling_rates = subsampling_rates
 
-        # this variable is used to identify MLDA objects which are
-        # not in the finest level (i.e. child MLDA objects)
-        self.is_child = kwargs.get("is_child", False)
         if self.is_child:
             # this is the subsampling rate applied to the current level
             # it is stored in the level above and transferred here
             self.subsampling_rate_above = kwargs.get("subsampling_rate_above", None)
         self.num_levels = len(self.coarse_models) + 1
         self.base_sampler = base_sampler
+
+        # VR is not compatible with compound base samplers so an automatic conversion
+        # to a block sampler happens here if
+        if self.variance_reduction and self.base_sampler == 'Metropolis' and not base_blocked:
+            warnings.warn(
+                'Variance reduction is not compatible with non-blocked (compound) samplers.'
+                'Automatically switching to a blocked Metropolis sampler.'
+            )
+            self.base_blocked = True
+        else:
+            self.base_blocked = base_blocked
         self.next_model = self.coarse_models[-1]
         self.base_S = base_S
         self.base_proposal_dist = base_proposal_dist
@@ -1166,7 +1179,6 @@ class MLDA(ArrayStepShared):
         self.base_lamb = base_lamb
         self.base_tune_drop_fraction = float(base_tune_drop_fraction)
         self.mode = mode
-        self.base_blocked = base_blocked
         self.base_scaling_stats = None
         if self.base_sampler == 'DEMetropolisZ':
             self.base_lambda_stats = None
@@ -1300,7 +1312,6 @@ class MLDA(ArrayStepShared):
                 self.Q_reg = [np.nan] * self.subsampling_rate_above
             if self.num_levels == 2:
                 self.Q_base_full = []
-                self.Q_base_from_previous_batch = np.nan
             if not self.is_child:
                 for level in range(self.num_levels - 1, 0, -1):
                     self.stats_dtypes[0][f'Q_{level}_{level - 1}'] = object
@@ -1438,49 +1449,20 @@ class MLDA(ArrayStepShared):
                 self.sub_counter += 1
 
             # if MLDA is in the level above the base level, extract the
-            # latest set of Q values and store them in Q_base. Also add them
-            # to the list Q_base_full which stores all the history of Q values from
-            # the base level. extract_Q_base is used when the base level
-            # sampler is a compound method, which requires special extraction
+            # latest set of Q values from Q_reg in the base level
+            # and add them to Q_base_full (which stores all the history of
+            # Q values from the base level)
             if self.num_levels == 2:
-                if isinstance(self.next_step_method, CompoundStep):
-                    Q_base = self.extract_Q_base()
-                    self.Q_base_full.extend(Q_base)
-                else:
-                    self.Q_base_full.extend(self.next_step_method.Q_reg)
+                self.Q_base_full.extend(self.next_step_method.Q_reg)
 
             # if the sample is accepted, update Q_diff_last with the latest
             # difference between the Q of this level and the last Q of the
             # level below. If sample is not accepted, just keep the latest
             # accepted Q_diff
             if accepted and not skipped_logp:
-                if isinstance(self.next_step_method, CompoundStep):
-                    self.Q_diff_last = self.Q_last - self.next_step_method.methods[-1].Q_reg[self.subsampling_rates[-1] - 1]#Q_base[self.subsampling_rates[-1] - 1]
-                else:
-                    self.Q_diff_last = self.Q_last - self.next_step_method.Q_reg[self.subsampling_rates[-1] - 1]
+                self.Q_diff_last = self.Q_last - self.next_step_method.Q_reg[self.subsampling_rates[-1] - 1]
             # Add the last accepted Q_diff to the list
             self.Q_diff.append(self.Q_diff_last)
-
-    def extract_Q_base(self):
-        """Construct and return the quantity of interest register from from base level
-        Compound method. It picks and returns only the last quantity of interest in
-        each complete Compound iteration."""
-        Q_base = [np.nan] * self.subsampling_rates[-1]
-        for i in range(self.subsampling_rates[-1]):
-            if self.next_step_method.methods[-1].acceptance_reg[i]:
-                Q_base[i] = self.next_step_method.methods[-1].Q_reg[i]
-            else:
-                try:
-                    last_accepted_index = max([d for d, m in enumerate(self.next_step_method.methods) if m.acceptance_reg[i]])
-                    Q_base[i] = self.next_step_method.methods[last_accepted_index].Q_reg[i]
-                except ValueError:
-                    # last_accepted_index = len(self.next_step_method.methods) - 1
-                    if i > 0:
-                        Q_base[i] = Q_base[i-1]
-                    else:
-                        Q_base[i] = self.Q_base_from_previous_batch
-        self.Q_base_from_previous_batch = Q_base[-1]
-        return Q_base
 
     @staticmethod
     def competence(var, has_grad):
