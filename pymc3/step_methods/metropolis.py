@@ -239,15 +239,10 @@ class Metropolis(ArrayStepShared):
             self.model = model
 
         shared = pm.make_shared_replacements(vars, model)
-
         if self.mlda_variance_reduction:
             self.delta_logp = delta_logp_inverse(model.logpt, vars, shared)
         else:
             self.delta_logp = delta_logp(model.logpt, vars, shared)
-
-        if self.is_mlda_base:
-            self.model = model
-
         super().__init__(vars, shared)
 
     def reset_tuning(self):
@@ -864,8 +859,6 @@ class DEMetropolisZ(ArrayStepShared):
             self.delta_logp = delta_logp_inverse(model.logpt, vars, shared)
         else:
             self.delta_logp = delta_logp(model.logpt, vars, shared)
-        if self.is_mlda_base:
-            self.model = model
 
         super().__init__(vars, shared)
 
@@ -1146,10 +1139,10 @@ class MLDA(ArrayStepShared):
             raise ValueError("MLDA step method was given an empty "
                              "list of coarse models. Give at least "
                              "one coarse model.")
+
         self.model = model
         self.variance_reduction = variance_reduction
         self.store_Q_fine = store_Q_fine
-
         # check that certain requirements hold
         # for the variance reduction feature to work
         if self.variance_reduction or self.store_Q_fine:
@@ -1166,9 +1159,7 @@ class MLDA(ArrayStepShared):
                                 "variable.")
 
         self.next_model = self.coarse_models[-1]
-        
         self.adaptive_error_model = adaptive_error_model
-
         # check that certain requirements hold
         # for the adaptive error model feature to work
         if self.adaptive_error_model:
@@ -1223,7 +1214,6 @@ class MLDA(ArrayStepShared):
             # this is the subsampling rate applied to the current level
             # it is stored in the level above and transferred here
             self.subsampling_rate_above = kwargs.get("subsampling_rate_above", None)
-
         self.num_levels = len(self.coarse_models) + 1
         self.base_sampler = base_sampler
 
@@ -1352,10 +1342,8 @@ class MLDA(ArrayStepShared):
                                    "subsampling_rate_above": self.subsampling_rates[-1]}
                 else:
                     mlda_kwargs = {"is_child": True}
-                if self.adaptive_error_correction:
-                    mlda_kwargs = {**mlda_kwargs,
-                                   **{"bias_all": self.bias_all}
-                                   }
+                if self.adaptive_error_model:
+                    mlda_kwargs = {**mlda_kwargs, **{"bias_all": self.bias_all}}
 
                 # MLDA sampler in some intermediate level, targeting self.next_model
                 self.next_step_method = pm.MLDA(vars=vars_next, base_S=self.base_S,
