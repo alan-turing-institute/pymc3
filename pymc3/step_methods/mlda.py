@@ -462,7 +462,6 @@ class MLDA(ArrayStepShared):
         self.model = model
         self.variance_reduction = variance_reduction
         self.store_Q_fine = store_Q_fine
-
         # check that certain requirements hold
         # for the variance reduction feature to work
         if self.variance_reduction or self.store_Q_fine:
@@ -479,9 +478,7 @@ class MLDA(ArrayStepShared):
                                 "variable.")
 
         self.next_model = self.coarse_models[-1]
-
         self.adaptive_error_model = adaptive_error_model
-
         # check that certain requirements hold
         # for the adaptive error model feature to work
         if self.adaptive_error_model:
@@ -538,7 +535,6 @@ class MLDA(ArrayStepShared):
             # this is the subsampling rate applied to the current level
             # it is stored in the level above and transferred here
             self.subsampling_rate_above = kwargs.get("subsampling_rate_above", None)
-
         self.num_levels = len(self.coarse_models) + 1
         self.base_sampler = base_sampler
 
@@ -659,8 +655,7 @@ class MLDA(ArrayStepShared):
                 else:
                     mlda_kwargs = {"is_child": True}
                 if self.adaptive_error_model:
-                    mlda_kwargs = {**mlda_kwargs,
-                                   **{"bias_all": self.bias_all}}
+                    mlda_kwargs = {**mlda_kwargs, **{"bias_all": self.bias_all}}
 
                 # MLDA sampler in some intermediate level, targeting self.next_model
                 self.next_step_method = pm.MLDA(vars=vars_next, base_S=self.base_S,
@@ -857,8 +852,7 @@ class MLDA(ArrayStepShared):
             # level below. If sample is not accepted, just keep the latest
             # accepted Q_diff
             if accepted and not skipped_logp:
-                self.Q_diff_last = self.Q_last - \
-                                   self.next_step_method.Q_reg[self.subsampling_rates[-1] - 1]
+                self.Q_diff_last = self.Q_last - self.next_step_method.Q_reg[self.subsampling_rates[-1] - 1]
             # Add the last accepted Q_diff to the list
             self.Q_diff.append(self.Q_diff_last)
 
