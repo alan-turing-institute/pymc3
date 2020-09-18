@@ -244,10 +244,9 @@ class DEMetropolisZMLDA(DEMetropolisZ):
         when the self.tuning_end_trigger flag is set to True.
         """
         if self.tuning_end_trigger:
-            it = len(self._history)
-            n_drop = int(self.tune_drop_fraction * it)
-            self._history = self._history[n_drop:]
-        return super().stop_tuning()
+            return super().stop_tuning()
+        else:
+            return
 
 
 class MLDA(ArrayStepShared):
@@ -596,7 +595,7 @@ class MLDA(ArrayStepShared):
         vars_next = pm.inputvars(vars_next)
         shared_next = pm.make_shared_replacements(vars_next, next_model)
         self.delta_logp_next = delta_logp(next_model.logpt, vars_next, shared_next)
-
+        self.model = model
         super().__init__(vars, shared)
 
         # initialise complete step method hierarchy
@@ -962,7 +961,7 @@ class RecursiveDAProposal(Proposal):
     """
 
     def __init__(self,
-                 next_step_method: Union[MLDA, Metropolis, CompoundStep],
+                 next_step_method: Union[MLDA, MetropolisMLDA, DEMetropolisZMLDA, CompoundStep],
                  next_model: Model,
                  tune: bool,
                  subsampling_rate: int) -> None:
@@ -990,6 +989,7 @@ class RecursiveDAProposal(Proposal):
             # to False (by MLDA's astep) when the burn-in
             # iterations of the highest-level MLDA sampler run out.
             # The change propagates to all levels.
+
             if self.tune:
                 # Subsample in tuning mode
                 self.trace = pm.subsample(draws=0, step=self.next_step_method,
