@@ -1537,10 +1537,13 @@ class TestMLDA:
             assert np.all(np.abs(s1 < 1e-1))
 
     def test_variance_reduction(self):
-        """Test if the right stats are outputed when variance reduction is used in MLDA,
+        """
+        Test if the right stats are outputed when variance reduction is used in MLDA,
         if the output estimates are close (VR estimate vs. standard estimate from
-        the first chain) and if the variance of VR is lower. Uses a linear regression
-        model with multiple levels where approximate levels have fewer data."""
+        the first chain) and if the variance of VR is lower. Also tests the extract_Q_values
+        utility function. Uses a linear regression model with multiple levels where
+        approximate levels have fewer data.
+        """
         # arithmetic precision
         if theano.config.floatX == "float32":
             p = "float32"
@@ -1553,7 +1556,7 @@ class TestMLDA:
         size = 100
         true_intercept = 1
         true_slope = 2
-        sigma = 1
+        sigma = 0.2
         x = np.linspace(0, 1, size, dtype=p)
         # y = a + b*x
         true_regression_line = true_intercept + true_slope * x
@@ -1694,13 +1697,13 @@ class TestMLDA:
                     ess_Q_2_1 = az.ess(np.array(Q_2_1, np.float64))
                     ess_Q2 = az.ess(np.array(Q_2, np.float64))
 
-                    # check that the variance of VR is smaller
-                    assert Q_2.var() / ess_Q2 > Q_0.var() / ess_Q0 + \
-                           Q_1_0.var() / ess_Q_1_0 + Q_2_1.var() / ess_Q_2_1
-
                     # check that the standard and VR estimates are close
                     assert isclose(Q_mean_standard, Q_mean_vr, rel_tol=1e-1)
 
                     if isinstance(f, Likelihood1):
                         assert Q_1_0.mean(axis=1) == 0.0
                         assert Q_2_1.mean(axis=1) == 0.0
+
+                    # check that the variance of VR is smaller
+                    assert Q_2.var() / ess_Q2 > Q_0.var() / ess_Q0 + \
+                           Q_1_0.var() / ess_Q_1_0 + Q_2_1.var() / ess_Q_2_1
