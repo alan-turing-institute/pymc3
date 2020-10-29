@@ -23,11 +23,12 @@ import theano
 import theano.tensor as tt
 
 import pymc3 as pm
+from pymc3.theanof import floatX
 
 from ..model import Model
 from .arraystep import ArrayStepShared, Competence, metrop_select
 from .compound import CompoundStep
-from .metropolis import DEMetropolisZ, Metropolis, Proposal, delta_logp
+from .metropolis import *
 
 __all__ = [
     "MetropolisMLDA",
@@ -37,7 +38,6 @@ __all__ = [
     "extract_Q_estimate",
 ]
 
-
 class MetropolisMLDA(Metropolis):
     """
     Metropolis-Hastings sampling step tailored for use as base sampler in MLDA.
@@ -45,36 +45,84 @@ class MetropolisMLDA(Metropolis):
 
     name = "metropolis_mlda"
 
-    def __init__(self, *args, **kwargs):
-        """
-        Initialise MetropolisMLDA. This is a mix of the parent's class' initialisation
-        and some extra code specific for MLDA.
-        """
+    default_blocked = False
+    generates_stats = True
+    stats_dtypes = [
+        {
+            "accept": np.float64,
+            "accepted": np.bool,
+            "tune": np.bool,
+            "scaling": np.float64,
+        }
+    ]
+
+    def __init__(
+        self,
+        vars=None,
+        S=None,
+        proposal_dist=None,
+        scaling=1.0,
+        tune=True,
+        tune_interval=100,
+        model=None,
+        mode=None,
+        **kwargs
+    ):
+
+        model = pm.modelcontext(model)
+
+        if vars is None:
+            vars = model.vars
+        vars = pm.inputvars(vars)
+
+        if S is None:
+            S = np.ones(sum(v.dsize for v in vars))
+
+        if proposal_dist is not None:
+            self.proposal_dist = proposal_dist(S)
+        elif S.ndim == 1:
+            self.proposal_dist = NormalProposal(S)
+        elif S.ndim == 2:
+            self.proposal_dist = MultivariateNormalProposal(S)
+        else:
+            raise ValueError("Invalid rank for variance: %s" % S.ndim)
+
+        self.scaling = np.atleast_1d(scaling).astype("d")
+        self.tune = tune
+        self.tune_interval = tune_interval
+        self.steps_until_tune = tune_interval
+        self.accepted = 0
+
+        # Determine type of variables
+        self.discrete = np.concatenate(
+            [[v.dtype in pm.discrete_types] * (v.dsize or 1) for v in vars]
+        )
+        self.any_discrete = self.discrete.any()
+        self.all_discrete = self.discrete.all()
+
+        # remember initial settings before tuning so they can be reset
+        self._untuned_settings = dict(
+            scaling=self.scaling, steps_until_tune=tune_interval, accepted=self.accepted
+        )
+
+        self.mode = mode
+
+        shared = pm.make_shared_replacements(vars, model)
+        self.logp = logp(model.logpt, vars, shared)
+        self.logp_state = None
+        
+        super(Metropolis, self).__init__(vars, shared)
 
         # flag to that variance reduction is activated - forces MetropolisMLDA
         # to store quantities of interest in a register if True
         self.mlda_variance_reduction = kwargs.pop("mlda_variance_reduction", False)
+        
         if self.mlda_variance_reduction:
             # Subsampling rate of MLDA sampler one level up
             self.mlda_subsampling_rate_above = kwargs.pop("mlda_subsampling_rate_above")
             self.sub_counter = 0
             self.Q_last = np.nan
             self.Q_reg = [np.nan] * self.mlda_subsampling_rate_above
-
-            # extract some necessary variables
-            model = pm.modelcontext(kwargs.get("model", None))
-            vars = kwargs.get("vars", None)
-            if vars is None:
-                vars = model.vars
-            vars = pm.inputvars(vars)
-            shared = pm.make_shared_replacements(vars, model)
-
-        # call parent class __init__
-        super().__init__(*args, **kwargs)
-
-        # modify the delta function and point to model if VR is used
-        if self.mlda_variance_reduction:
-            self.delta_logp = delta_logp_inverse(model.logpt, vars, shared)
             self.model = model
 
     def reset_tuning(self):
@@ -86,19 +134,56 @@ class MetropolisMLDA(Metropolis):
         return
 
     def astep(self, q0):
+        if self.logp_state is None:
+            self.logp_state = self.logp(q0)
+            
+        if not self.steps_until_tune and self.tune:
+            # Tune scaling parameter
+            self.scaling = tune(self.scaling, self.accepted / float(self.tune_interval))
+            # Reset counter
+            self.steps_until_tune = self.tune_interval
+            self.accepted = 0
 
-        q_new, stats = super().astep(q0)
+        delta = self.proposal_dist() * self.scaling
+
+        if self.any_discrete:
+            if self.all_discrete:
+                delta = np.round(delta, 0).astype("int64")
+                q0 = q0.astype("int64")
+                q = (q0 + delta).astype("int64")
+            else:
+                delta[self.discrete] = np.round(delta[self.discrete], 0)
+                q = q0 + delta
+        else:
+            q = floatX(q0 + delta)
+
+        logp_proposal = self.logp(q)
+        accept = logp_proposal - self.logp_state
+        q_new, accepted = metrop_select(accept, q, q0)
+        self.accepted += accepted
+        
+        if accepted:
+            self.logp_state = logp_proposal
+
+        self.steps_until_tune -= 1
+
+        stats = {
+            "tune": self.tune,
+            "scaling": self.scaling,
+            "accept": np.exp(accept),
+            "accepted": accepted,
+        }
 
         # Add variance reduction functionality.
         if self.mlda_variance_reduction:
-            if stats[0]["accepted"]:
+            if accepted:
                 self.Q_last = self.model.Q.get_value()
             if self.sub_counter == self.mlda_subsampling_rate_above:
                 self.sub_counter = 0
             self.Q_reg[self.sub_counter] = self.Q_last
             self.sub_counter += 1
 
-        return q_new, stats
+        return q_new, [stats]
 
 
 class DEMetropolisZMLDA(DEMetropolisZ):
@@ -108,11 +193,77 @@ class DEMetropolisZMLDA(DEMetropolisZ):
 
     name = "DEMetropolisZ_mlda"
 
-    def __init__(self, *args, **kwargs):
-        """
-        Initialise DEMetropolisZMLDA, uses parent class __init__
-        and extra code specific for use within MLDA.
-        """
+    default_blocked = True
+    generates_stats = True
+    stats_dtypes = [
+        {
+            "accept": np.float64,
+            "accepted": np.bool,
+            "tune": np.bool,
+            "scaling": np.float64,
+            "lambda": np.float64,
+        }
+    ]
+
+    def __init__(
+        self,
+        vars=None,
+        S=None,
+        proposal_dist=None,
+        lamb=None,
+        scaling=0.001,
+        tune="lambda",
+        tune_interval=100,
+        tune_drop_fraction: float = 0.9,
+        model=None,
+        mode=None,
+        **kwargs
+    ):
+        model = pm.modelcontext(model)
+
+        if vars is None:
+            vars = model.cont_vars
+        vars = pm.inputvars(vars)
+
+        if S is None:
+            S = np.ones(model.ndim)
+
+        if proposal_dist is not None:
+            self.proposal_dist = proposal_dist(S)
+        else:
+            self.proposal_dist = UniformProposal(S)
+
+        self.scaling = np.atleast_1d(scaling).astype("d")
+        if lamb is None:
+            # default to the optimal lambda for normally distributed targets
+            lamb = 2.38 / np.sqrt(2 * model.ndim)
+        self.lamb = float(lamb)
+        if tune not in {None, "scaling", "lambda"}:
+            raise ValueError('The parameter "tune" must be one of {None, scaling, lambda}')
+        self.tune = True
+        self.tune_target = tune
+        self.tune_interval = tune_interval
+        self.tune_drop_fraction = tune_drop_fraction
+        self.steps_until_tune = tune_interval
+        self.accepted = 0
+
+        # cache local history for the Z-proposals
+        self._history = []
+        # remember initial settings before tuning so they can be reset
+        self._untuned_settings = dict(
+            scaling=self.scaling,
+            lamb=self.lamb,
+            steps_until_tune=tune_interval,
+            accepted=self.accepted,
+        )
+
+        self.mode = mode
+
+        shared = pm.make_shared_replacements(vars, model)
+        self.logp = logp(model.logpt, vars, shared)
+        self.logp_state = None
+        
+        super(DEMetropolisZ, self).__init__(vars, shared)
 
         # flag used for signaling the end of tuning
         self.tuning_end_trigger = False
@@ -120,27 +271,13 @@ class DEMetropolisZMLDA(DEMetropolisZ):
         # flag to that variance reduction is activated - forces DEMetropolisZMLDA
         # to store quantities of interest in a register if True
         self.mlda_variance_reduction = kwargs.pop("mlda_variance_reduction", False)
+        
         if self.mlda_variance_reduction:
             # Subsampling rate of MLDA sampler one level up
             self.mlda_subsampling_rate_above = kwargs.pop("mlda_subsampling_rate_above")
             self.sub_counter = 0
             self.Q_last = np.nan
             self.Q_reg = [np.nan] * self.mlda_subsampling_rate_above
-
-            # extract some necessary variables
-            model = pm.modelcontext(kwargs.get("model", None))
-            vars = kwargs.get("vars", None)
-            if vars is None:
-                vars = model.vars
-            vars = pm.inputvars(vars)
-            shared = pm.make_shared_replacements(vars, model)
-
-        # call parent class __init__
-        super().__init__(*args, **kwargs)
-
-        # modify the delta function and point to model if VR is used
-        if self.mlda_variance_reduction:
-            self.delta_logp = delta_logp_inverse(model.logpt, vars, shared)
             self.model = model
 
     def reset_tuning(self):
@@ -152,19 +289,68 @@ class DEMetropolisZMLDA(DEMetropolisZ):
         return
 
     def astep(self, q0):
+        if self.logp_state is None:
+            self.logp_state = self.logp(q0)
+            
+        # same tuning scheme as DEMetropolis
+        if not self.steps_until_tune and self.tune:
+            if self.tune_target == "scaling":
+                self.scaling = tune(self.scaling, self.accepted / float(self.tune_interval))
+            elif self.tune_target == "lambda":
+                self.lamb = tune(self.lamb, self.accepted / float(self.tune_interval))
+            # Reset counter
+            self.steps_until_tune = self.tune_interval
+            self.accepted = 0
 
-        q_new, stats = super().astep(q0)
+        epsilon = self.proposal_dist() * self.scaling
+
+        it = len(self._history)
+        # use the DE-MCMC-Z proposal scheme as soon as the history has 2 entries
+        if it > 1:
+            # differential evolution proposal
+            # select two other chains
+            iz1 = np.random.randint(it)
+            iz2 = np.random.randint(it)
+            while iz2 == iz1:
+                iz2 = np.random.randint(it)
+
+            z1 = self._history[iz1]
+            z2 = self._history[iz2]
+            # propose a jump
+            q = floatX(q0 + self.lamb * (z1 - z2) + epsilon)
+        else:
+            # propose just with noise in the first 2 iterations
+            q = floatX(q0 + epsilon)
+
+        logp_proposal = self.logp(q)
+        accept = logp_proposal - self.logp_state
+        q_new, accepted = metrop_select(accept, q, q0)
+        self.accepted += accepted
+        self._history.append(q_new)
+        
+        if accepted:
+            self.logp_state = logp_proposal
+
+        self.steps_until_tune -= 1
+
+        stats = {
+            "tune": self.tune,
+            "scaling": self.scaling,
+            "lambda": self.lamb,
+            "accept": np.exp(accept),
+            "accepted": accepted,
+        }
 
         # Add variance reduction functionality.
         if self.mlda_variance_reduction:
-            if stats[0]["accepted"]:
+            if accepted:
                 self.Q_last = self.model.Q.get_value()
             if self.sub_counter == self.mlda_subsampling_rate_above:
                 self.sub_counter = 0
             self.Q_reg[self.sub_counter] = self.Q_last
             self.sub_counter += 1
 
-        return q_new, stats
+        return q_new, [stats]
 
     def stop_tuning(self):
         """At the end of the tuning phase, this method
@@ -551,7 +737,8 @@ class MLDA(ArrayStepShared):
         # Construct theano function for current-level model likelihood
         # (for use in acceptance)
         shared = pm.make_shared_replacements(vars, model)
-        self.delta_logp = delta_logp_inverse(model.logpt, vars, shared)
+        self.logp = logp(model.logpt, vars, shared)
+        self.logp_state = None
 
         # Construct theano function for below-level model likelihood
         # (for use in acceptance)
@@ -559,7 +746,8 @@ class MLDA(ArrayStepShared):
         vars_below = [var for var in model_below.vars if var.name in self.var_names]
         vars_below = pm.inputvars(vars_below)
         shared_below = pm.make_shared_replacements(vars_below, model_below)
-        self.delta_logp_below = delta_logp(model_below.logpt, vars_below, shared_below)
+        self.logp_below = logp(model_below.logpt, vars_below, shared_below)
+        self.logp_state_below = None
 
         super().__init__(vars, shared)
 
@@ -703,6 +891,10 @@ class MLDA(ArrayStepShared):
 
     def astep(self, q0):
         """One MLDA step, given current sample q0"""
+        if self.logp_state is None:
+            self.logp_state = self.logp(q0)
+            self.logp_state_below = self.logp_below(q0)
+            
         # Check if the tuning flag has been changed and if yes,
         # change the proposal's tuning flag and reset self.accepted
         # This is triggered by _iter_sample while the highest-level MLDA step
@@ -742,13 +934,23 @@ class MLDA(ArrayStepShared):
             accept = np.float(0.0)
             skipped_logp = True
         else:
-            accept = self.delta_logp(q, q0) + self.delta_logp_below(q0, q)
+            logp_proposal = self.logp(q)
+            if isinstance(self.step_method_below, CompoundStep):
+                logp_proposal_below = self.step_method_below.methods[-1].logp_state
+            else:
+                logp_proposal_below = self.step_method_below.logp_state
+            accept = logp_proposal - self.logp_state + self.logp_state_below - logp_proposal_below
             skipped_logp = False
 
         # Accept/reject sample - next sample is stored in q_new
         q_new, accepted = metrop_select(accept, q, q0)
+        
         if skipped_logp:
             accepted = False
+        
+        if accepted:
+            self.logp_state = logp_proposal
+            self.logp_state_below = logp_proposal_below
 
         # if sample is accepted, update self.Q_last with the sample's Q value
         # runs only for VR or when store_Q_fine is True
@@ -878,6 +1080,10 @@ class MLDA(ArrayStepShared):
             # The model variables mu_B and Signa_B of a level are the
             # sum of the bias corrections of all levels below and including
             # that level. This sum is updated here.
+            
+            #self.model_below.mu_B.set_value(sum([bias.get_mu()for bias in self.bias_all[:len(self.bias_all) - self.num_levels + 2]]))
+            #self.model_below.Sigma_B.set_value(sum([bias.get_sigma()for bias in self.bias_all[:len(self.bias_all) - self.num_levels + 2]]))
+            
             with self.model_below:
                 pm.set_data(
                     {
@@ -954,19 +1160,12 @@ class RecursiveSampleMoments:
 
         self.t += 1
 
+def logp(logp, vars, shared):
+    [logp], inarray = pm.join_nonshared_inputs([logp], vars, shared)
 
-def delta_logp_inverse(logp, vars, shared):
-    [logp0], inarray0 = pm.join_nonshared_inputs([logp], vars, shared)
-
-    tensor_type = inarray0.type
-    inarray1 = tensor_type("inarray1")
-
-    logp1 = pm.CallableTensor(logp0)(inarray1)
-
-    f = theano.function([inarray1, inarray0], -logp0 + logp1)
+    f = theano.function([inarray], logp)
     f.trust_input = True
     return f
-
 
 def extract_Q_estimate(trace, levels):
     """
