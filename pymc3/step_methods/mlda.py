@@ -108,8 +108,10 @@ class MetropolisMLDA(Metropolis):
         self.mode = mode
 
         shared = pm.make_shared_replacements(vars, model)
+        # set up the logp function and the state, which saves model evaluations.
         self.logp = logp(model.logpt, vars, shared)
         self.logp_state = None
+        self.logp_state_cached = None
         
         super(Metropolis, self).__init__(vars, shared)
 
@@ -124,6 +126,15 @@ class MetropolisMLDA(Metropolis):
             self.Q_last = np.nan
             self.Q_reg = [np.nan] * self.mlda_subsampling_rate_above
             self.model = model
+            
+        # flag to signify that AEM is active on the level above.
+        self.mlda_adaptive_error_model = kwargs.pop("mlda_adaptive_error_model", False)
+        
+        if self.mlda_adaptive_error_model:
+            # if AEM is active, the base sampler must know about its model context
+            # and store the latest model output.
+            self.model = model
+            self.last_synced_output = None
 
     def reset_tuning(self):
         """
@@ -134,8 +145,6 @@ class MetropolisMLDA(Metropolis):
         return
 
     def astep(self, q0):
-        if self.logp_state is None:
-            self.logp_state = self.logp(q0)
             
         if not self.steps_until_tune and self.tune:
             # Tune scaling parameter
@@ -156,13 +165,23 @@ class MetropolisMLDA(Metropolis):
                 q = q0 + delta
         else:
             q = floatX(q0 + delta)
-
+            
+        if self.logp_state is None:
+            # set the state if it doesn't exist, or has been changed,
+            self.logp_state = self.logp(q0)
+            if self.tune and self.mlda_adaptive_error_model:
+                # get the latest output for the AEM.
+                self.last_synced_output = self.model.model_output.get_value()
+        # save the original state for mlda evaluation.
+        self.logp_state_cached = self.logp_state.copy()
+        
         logp_proposal = self.logp(q)
         accept = logp_proposal - self.logp_state
         q_new, accepted = metrop_select(accept, q, q0)
         self.accepted += accepted
         
         if accepted:
+            # if accepted, the sampler moves and the state changes.
             self.logp_state = logp_proposal
 
         self.steps_until_tune -= 1
@@ -182,6 +201,10 @@ class MetropolisMLDA(Metropolis):
                 self.sub_counter = 0
             self.Q_reg[self.sub_counter] = self.Q_last
             self.sub_counter += 1
+        
+        if self.tune and self.mlda_adaptive_error_model and accepted:
+            # store the latest output, if the proposal was accepted.
+            self.last_synced_output = self.model.model_output.get_value()
 
         return q_new, [stats]
 
@@ -260,15 +283,17 @@ class DEMetropolisZMLDA(DEMetropolisZ):
         self.mode = mode
 
         shared = pm.make_shared_replacements(vars, model)
+        # set up the logp function and the state, which saves model evaluations.
         self.logp = logp(model.logpt, vars, shared)
         self.logp_state = None
+        self.logp_state_cached = None
         
         super(DEMetropolisZ, self).__init__(vars, shared)
 
         # flag used for signaling the end of tuning
         self.tuning_end_trigger = False
 
-        # flag to that variance reduction is activated - forces DEMetropolisZMLDA
+        # flag to signify that variance reduction is activated - forces DEMetropolisZMLDA
         # to store quantities of interest in a register if True
         self.mlda_variance_reduction = kwargs.pop("mlda_variance_reduction", False)
         
@@ -279,6 +304,15 @@ class DEMetropolisZMLDA(DEMetropolisZ):
             self.Q_last = np.nan
             self.Q_reg = [np.nan] * self.mlda_subsampling_rate_above
             self.model = model
+        
+        # flag to signify that AEM is active on the level above.
+        self.mlda_adaptive_error_model = kwargs.pop("mlda_adaptive_error_model", False)
+        
+        if self.mlda_adaptive_error_model:
+            # if AEM is active, the base sampler must know about its model context
+            # and store the latest model output.
+            self.model = model
+            self.last_synced_output = None
 
     def reset_tuning(self):
         """Skips resetting of tuned sampler parameters
@@ -289,9 +323,7 @@ class DEMetropolisZMLDA(DEMetropolisZ):
         return
 
     def astep(self, q0):
-        if self.logp_state is None:
-            self.logp_state = self.logp(q0)
-            
+        
         # same tuning scheme as DEMetropolis
         if not self.steps_until_tune and self.tune:
             if self.tune_target == "scaling":
@@ -321,7 +353,16 @@ class DEMetropolisZMLDA(DEMetropolisZ):
         else:
             # propose just with noise in the first 2 iterations
             q = floatX(q0 + epsilon)
-
+            
+        if self.logp_state is None:
+            # set the state if it doesn't exist, or has been changed,
+            self.logp_state = self.logp(q0)
+            if self.tune and self.mlda_adaptive_error_model:
+                # get the latest output for the AEM.
+                self.last_synced_output = self.model.model_output.get_value()
+        # save the original state for mlda evaluation.
+        self.logp_state_cached = self.logp_state.copy()
+        
         logp_proposal = self.logp(q)
         accept = logp_proposal - self.logp_state
         q_new, accepted = metrop_select(accept, q, q0)
@@ -329,6 +370,7 @@ class DEMetropolisZMLDA(DEMetropolisZ):
         self._history.append(q_new)
         
         if accepted:
+            # if accepted, the sampler moves and the state changes.
             self.logp_state = logp_proposal
 
         self.steps_until_tune -= 1
@@ -349,6 +391,10 @@ class DEMetropolisZMLDA(DEMetropolisZ):
                 self.sub_counter = 0
             self.Q_reg[self.sub_counter] = self.Q_last
             self.sub_counter += 1
+        
+        if self.tune and self.mlda_adaptive_error_model and accepted:
+            # store the latest output, if the proposal was accepted.
+            self.last_synced_output = self.model.model_output.get_value()
 
         return q_new, [stats]
 
@@ -666,6 +712,7 @@ class MLDA(ArrayStepShared):
                 self.bias_all.append(self.bias)
 
             # variables used for adaptive error model
+            self.last_synced_output = None
             self.last_synced_output_diff = None
             self.adaptation_started = False
 
@@ -691,12 +738,18 @@ class MLDA(ArrayStepShared):
         # to a block sampler happens here if
         if self.variance_reduction and self.base_sampler == "Metropolis" and not base_blocked:
             warnings.warn(
-                "Variance reduction is not compatible with non-blocked (compound) samplers."
+                "Variance Reduction is not compatible with non-blocked (compound) samplers."
                 "Automatically switching to a blocked Metropolis sampler."
             )
-            self.base_blocked = True
-        else:
-            self.base_blocked = base_blocked
+            base_blocked = True
+        if self.adaptive_error_model and self.base_sampler == "Metropolis" and not base_blocked:
+            warnings.warn(
+                "Adaptive Error Model is not compatible with non-blocked (compound) samplers."
+                "Automatically switching to a blocked Metropolis sampler."
+            )
+            base_blocked = True
+
+        self.base_blocked = base_blocked
 
         self.base_S = base_S
         self.base_proposal_dist = base_proposal_dist
@@ -735,19 +788,12 @@ class MLDA(ArrayStepShared):
         self.accepted = 0
 
         # Construct theano function for current-level model likelihood
-        # (for use in acceptance)
+        # (for use in acceptance). also store the state to minimise 
+        # number of model evaluations.
         shared = pm.make_shared_replacements(vars, model)
         self.logp = logp(model.logpt, vars, shared)
         self.logp_state = None
-
-        # Construct theano function for below-level model likelihood
-        # (for use in acceptance)
-        model_below = pm.modelcontext(self.model_below)
-        vars_below = [var for var in model_below.vars if var.name in self.var_names]
-        vars_below = pm.inputvars(vars_below)
-        shared_below = pm.make_shared_replacements(vars_below, model_below)
-        self.logp_below = logp(model_below.logpt, vars_below, shared_below)
-        self.logp_state_below = None
+        self.logp_state_cached = None
 
         super().__init__(vars, shared)
 
@@ -765,6 +811,10 @@ class MLDA(ArrayStepShared):
                     }
                 else:
                     base_kwargs = {}
+                if self.adaptive_error_model:
+                    base_kwargs = {**base_kwargs, 
+                        **{"mlda_adaptive_error_model": self.adaptive_error_model}
+                    }
 
                 if self.base_sampler == "Metropolis":
                     # MetropolisMLDA sampler in base level (level=0), targeting self.model_below
@@ -891,9 +941,6 @@ class MLDA(ArrayStepShared):
 
     def astep(self, q0):
         """One MLDA step, given current sample q0"""
-        if self.logp_state is None:
-            self.logp_state = self.logp(q0)
-            self.logp_state_below = self.logp_below(q0)
             
         # Check if the tuning flag has been changed and if yes,
         # change the proposal's tuning flag and reset self.accepted
@@ -921,8 +968,16 @@ class MLDA(ArrayStepShared):
             self.subchain_selection = np.random.randint(0, self.subsampling_rate)
         else:
             self.subchain_selection = self.subsampling_rate - 1
+        # save the original state for mlda evaluation.
         self.proposal_dist.subchain_selection = self.subchain_selection
-
+        
+        if self.logp_state is None:
+            # set the state if it doesn't exist, or has been changed,
+            self.logp_state = self.logp(q0)
+            if self.tune and self.adaptive_error_model:
+                self.last_synced_output = self.model.model_output.get_value()
+        self.logp_state_cached = self.logp_state.copy()
+        
         # Call the recursive DA proposal to get proposed sample
         # and convert dict -> numpy array
         q = self.bij.map(self.proposal_dist(q0_dict))
@@ -935,11 +990,15 @@ class MLDA(ArrayStepShared):
             skipped_logp = True
         else:
             logp_proposal = self.logp(q)
+            # get the logp of the state and proposal from the level below.
             if isinstance(self.step_method_below, CompoundStep):
                 logp_proposal_below = self.step_method_below.methods[-1].logp_state
+                logp_state_below = self.step_method_below.methods[-1].logp_state_cached
             else:
                 logp_proposal_below = self.step_method_below.logp_state
-            accept = logp_proposal - self.logp_state + self.logp_state_below - logp_proposal_below
+                logp_state_below = self.step_method_below.logp_state_cached
+            
+            accept = logp_proposal - self.logp_state + logp_state_below - logp_proposal_below
             skipped_logp = False
 
         # Accept/reject sample - next sample is stored in q_new
@@ -949,8 +1008,16 @@ class MLDA(ArrayStepShared):
             accepted = False
         
         if accepted:
+            # if accepted, the sampler moves and the state changes.
             self.logp_state = logp_proposal
-            self.logp_state_below = logp_proposal_below
+            if self.tune and self.adaptive_error_model:
+                # if the error model is active, the likelihood must be
+                # recomputed with the sampler below to reflect updates.
+                self.step_method_below.logp_state = None
+                self.last_synced_output = self.model.model_output.get_value()
+        else:
+            # if not accepted, the sampler below is reset.
+            self.step_method_below.logp_state = None
 
         # if sample is accepted, update self.Q_last with the sample's Q value
         # runs only for VR or when store_Q_fine is True
@@ -960,11 +1027,11 @@ class MLDA(ArrayStepShared):
 
         # Variance reduction
         if self.variance_reduction:
-            self.update_vr_variables(accepted, skipped_logp)
+            self.update_vr_variables(accepted)
 
         # Adaptive error model - runs only during tuning.
         if self.tune and self.adaptive_error_model:
-            self.update_error_estimate(accepted, skipped_logp)
+            self.update_error_estimate(accepted)
 
         # Update acceptance counter
         self.accepted += accepted
@@ -1018,7 +1085,7 @@ class MLDA(ArrayStepShared):
 
         return q_new, [stats] + self.base_tuning_stats
 
-    def update_vr_variables(self, accepted, skipped_logp):
+    def update_vr_variables(self, accepted):
         """Updates all the variables necessary for VR to work.
 
         Each level has a Q_last and Q_diff_last register which store
@@ -1049,12 +1116,12 @@ class MLDA(ArrayStepShared):
         # difference between the last Q of this level and the Q of the
         # proposed (selected) sample from the level below.
         # If sample is not accepted, just keep the latest accepted Q_diff
-        if accepted and not skipped_logp:
+        if accepted:
             self.Q_diff_last = self.Q_last - self.step_method_below.Q_reg[self.subchain_selection]
         # Add the last accepted Q_diff to the list
         self.Q_diff.append(self.Q_diff_last)
 
-    def update_error_estimate(self, accepted, skipped_logp):
+    def update_error_estimate(self, accepted):
         """Updates the adaptive error model estimate with
         the latest accepted forward model output difference. Also
         updates the model variables mu_B and Sigma_B.
@@ -1063,11 +1130,11 @@ class MLDA(ArrayStepShared):
         model between the current level and the level below."""
 
         # only save errors when a sample is accepted (excluding skipped_logp)
-        if accepted and not skipped_logp:
+        if accepted:
             # this is the error (i.e. forward model output difference)
             # between the current level's model and the model in the level below
             self.last_synced_output_diff = (
-                self.model.model_output.get_value() - self.model_below.model_output.get_value()
+                self.last_synced_output - self.step_method_below.last_synced_output
             )
             self.adaptation_started = True
 
@@ -1080,35 +1147,8 @@ class MLDA(ArrayStepShared):
             # The model variables mu_B and Signa_B of a level are the
             # sum of the bias corrections of all levels below and including
             # that level. This sum is updated here.
-            
-            #self.model_below.mu_B.set_value(sum([bias.get_mu()for bias in self.bias_all[:len(self.bias_all) - self.num_levels + 2]]))
-            #self.model_below.Sigma_B.set_value(sum([bias.get_sigma()for bias in self.bias_all[:len(self.bias_all) - self.num_levels + 2]]))
-            
-            with self.model_below:
-                pm.set_data(
-                    {
-                        "mu_B": sum(
-                            [
-                                bias.get_mu()
-                                for bias in self.bias_all[
-                                    : len(self.bias_all) - self.num_levels + 2
-                                ]
-                            ]
-                        )
-                    }
-                )
-                pm.set_data(
-                    {
-                        "Sigma_B": sum(
-                            [
-                                bias.get_sigma()
-                                for bias in self.bias_all[
-                                    : len(self.bias_all) - self.num_levels + 2
-                                ]
-                            ]
-                        )
-                    }
-                )
+            self.model_below.mu_B.set_value(sum([bias.get_mu()for bias in self.bias_all[:len(self.bias_all) - self.num_levels + 2]]))
+            self.model_below.Sigma_B.set_value(sum([bias.get_sigma()for bias in self.bias_all[:len(self.bias_all) - self.num_levels + 2]]))
 
     @staticmethod
     def competence(var, has_grad):
