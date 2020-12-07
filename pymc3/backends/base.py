@@ -14,21 +14,21 @@
 
 """Base backend for traces
 
-See the docstring for pymc3.backends for more information (including
-creating custom backends).
+See the docstring for pymc3.backends for more information
 """
 import itertools as itl
 import logging
-from typing import Dict, List, Optional
+import warnings
+
 from abc import ABC
+from typing import List
 
 import numpy as np
-import warnings
 import theano.tensor as tt
 
-from ..model import modelcontext, Model
-from .report import SamplerReport, merge_reports
+from ..model import modelcontext
 from ..util import get_var_name
+from .report import SamplerReport, merge_reports
 
 logger = logging.getLogger("pymc3")
 
@@ -274,14 +274,14 @@ class MultiTrace:
 
     Attributes
     ----------
-        nchains: int
-            Number of chains in the `MultiTrace`.
-        chains: `List[int]`
-            List of chain indices
-        report: str
-            Report on the sampling process.
-        varnames: `List[str]`
-            List of variable names in the trace(s)
+    nchains: int
+        Number of chains in the `MultiTrace`.
+    chains: `List[int]`
+        List of chain indices
+    report: str
+        Report on the sampling process.
+    varnames: `List[str]`
+        List of variable names in the trace(s)
     """
 
     def __init__(self, straces):

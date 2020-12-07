@@ -14,24 +14,26 @@
 
 import numpy as np
 import numpy.testing as npt
-import theano.tensor as tt
-import theano
-import theano.tests.unittest_tools as utt
-import pymc3 as pm
-from scipy import stats, interpolate
 import pytest
+import theano
+import theano.tensor as tt
 
-from ..theanof import floatX
+from scipy import interpolate, stats
+
+import pymc3 as pm
+
 from ..distributions import Discrete
 from ..distributions.dist_math import (
-    bound,
-    factln,
-    alltrue_scalar,
     MvNormalLogp,
     SplineWrapper,
-    i0e,
+    alltrue_scalar,
+    bound,
     clipped_beta_rvs,
+    factln,
+    i0e,
 )
+from ..theanof import floatX
+from .helpers import verify_grad
 
 
 def test_bound():
@@ -175,10 +177,10 @@ class TestMvNormalLogp:
         chol_vec_val = floatX(np.array([0.5, 1.0, -0.1]))
 
         delta_val = floatX(np.random.randn(1, 2))
-        utt.verify_grad(func, [chol_vec_val, delta_val])
+        verify_grad(func, [chol_vec_val, delta_val])
 
         delta_val = floatX(np.random.randn(5, 2))
-        utt.verify_grad(func, [chol_vec_val, delta_val])
+        verify_grad(func, [chol_vec_val, delta_val])
 
     @pytest.mark.skip(reason="Fix in theano not released yet: Theano#5908")
     @theano.configparser.change_flags(compute_test_value="ignore")
@@ -205,7 +207,7 @@ class TestSplineWrapper:
         x = np.linspace(0, 1, 100)
         y = x * x
         spline = SplineWrapper(interpolate.InterpolatedUnivariateSpline(x, y, k=1))
-        utt.verify_grad(spline, [0.5])
+        verify_grad(spline, [0.5])
 
     @theano.configparser.change_flags(compute_test_value="ignore")
     def test_hessian(self):
@@ -221,10 +223,10 @@ class TestSplineWrapper:
 class TestI0e:
     @theano.configparser.change_flags(compute_test_value="ignore")
     def test_grad(self):
-        utt.verify_grad(i0e, [0.5])
-        utt.verify_grad(i0e, [-2.0])
-        utt.verify_grad(i0e, [[0.5, -2.0]])
-        utt.verify_grad(i0e, [[[0.5, -2.0]]])
+        verify_grad(i0e, [0.5])
+        verify_grad(i0e, [-2.0])
+        verify_grad(i0e, [[0.5, -2.0]])
+        verify_grad(i0e, [[[0.5, -2.0]]])
 
 
 @pytest.mark.parametrize("dtype", ["float16", "float32", "float64", "float128"])

@@ -13,12 +13,16 @@
 #   limitations under the License.
 
 import logging
+
 import numpy as np
 import scipy
 import theano
 import theano.tensor as tt
+
+from theano.gof.op import get_test_value
+
+from ..exceptions import DtypeError, ShapeError
 from ..ode import utils
-from ..exceptions import ShapeError, DtypeError
 
 _log = logging.getLogger("pymc3")
 floatX = theano.config.floatX
@@ -163,7 +167,7 @@ class DifferentialEquation(theano.Op):
         if theano.config.compute_test_value != "off":
             # compute test values from input test values
             test_states, test_sens = self._simulate(
-                y0=self._get_test_value(y0), theta=self._get_test_value(theta)
+                y0=get_test_value(y0), theta=get_test_value(theta)
             )
 
             # check types of simulation result

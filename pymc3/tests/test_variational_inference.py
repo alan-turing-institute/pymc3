@@ -12,36 +12,34 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-import pytest
 import functools
 import io
 import operator
+
 import numpy as np
+import pytest
 import theano
 import theano.tensor as tt
-
 
 import pymc3 as pm
 import pymc3.memoize
 import pymc3.util
-from pymc3.theanof import (
-    change_flags,
-    intX,
-)
+
+from pymc3.theanof import change_flags, intX
+from pymc3.variational import flows, opvi
 from pymc3.variational.approximations import (
-    MeanFieldGroup,
-    FullRankGroup,
-    NormalizingFlowGroup,
-    EmpiricalGroup,
-    MeanField,
-    FullRank,
-    NormalizingFlow,
     Empirical,
+    EmpiricalGroup,
+    FullRank,
+    FullRankGroup,
+    MeanField,
+    MeanFieldGroup,
+    NormalizingFlow,
+    NormalizingFlowGroup,
 )
-from pymc3.variational.inference import ADVI, FullRankADVI, SVGD, NFVI, ASVGD, fit
-from pymc3.variational import flows
+from pymc3.variational.inference import ADVI, ASVGD, NFVI, SVGD, FullRankADVI, fit
 from pymc3.variational.opvi import Approximation, Group
-from pymc3.variational import opvi
+
 from . import models
 from .helpers import not_raises
 
@@ -176,12 +174,10 @@ def three_var_approx_single_group_mf(three_var_model):
     return MeanField(model=three_var_model)
 
 
-@pytest.fixture(
-    params=[("ndarray", None), ("text", "test"), ("sqlite", "test.sqlite"), ("hdf5", "test.h5")]
-)
+@pytest.fixture
 def test_sample_simple(three_var_approx, request):
     backend, name = request.param
-    trace = three_var_approx.sample(100, backend=backend, name=name)
+    trace = three_var_approx.sample(100, name=name)
     assert set(trace.varnames) == {"one", "one_log__", "three", "two"}
     assert len(trace) == 100
     assert trace[0]["one"].shape == (10, 2)
@@ -750,7 +746,7 @@ def test_remove_scan_op():
         inference = ADVI()
         buff = io.StringIO()
         inference.run_profiling(n=10).summary(buff)
-        assert "theano.scan_module.scan_op.Scan" not in buff.getvalue()
+        assert "theano.scan.op.Scan" not in buff.getvalue()
         buff.close()
 
 

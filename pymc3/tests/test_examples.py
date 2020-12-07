@@ -15,12 +15,15 @@
 import matplotlib
 import numpy as np
 import pandas as pd
-import pymc3 as pm
-import theano.tensor as tt
 import pytest
 import theano
-from pymc3.theanof import floatX
+import theano.tensor as tt
+
 from packaging import version
+
+import pymc3 as pm
+
+from pymc3.theanof import floatX
 
 from .helpers import SeededTest
 
@@ -274,7 +277,7 @@ class TestLatentOccupancy(SeededTest):
             # Estimated mean count
             theta = pm.Uniform("theta", 0, 100)
             # Poisson likelihood
-            pm.ZeroInflatedPoisson("y", theta, psi, observed=self.y)
+            pm.ZeroInflatedPoisson("y", psi, theta, observed=self.y)
         return model
 
     def test_run(self):

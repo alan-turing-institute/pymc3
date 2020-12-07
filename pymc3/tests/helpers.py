@@ -12,12 +12,17 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
-from logging.handlers import BufferingHandler
 import contextlib
+
+from logging.handlers import BufferingHandler
+
 import numpy.random as nr
-from theano.sandbox.rng_mrg import MRG_RandomStreams
-from ..theanof import set_tt_rng, tt_rng
 import theano
+
+from theano.gradient import verify_grad as tt_verify_grad
+from theano.sandbox.rng_mrg import MRG_RandomStreams
+
+from ..theanof import set_tt_rng, tt_rng
 
 
 class SeededTest:
@@ -106,3 +111,9 @@ def select_by_precision(float64, float32):
 @contextlib.contextmanager
 def not_raises():
     yield
+
+
+def verify_grad(op, pt, n_tests=2, rng=None, *args, **kwargs):
+    if rng is None:
+        rng = nr.RandomState(411342)
+    tt_verify_grad(op, pt, n_tests, rng, *args, **kwargs)
