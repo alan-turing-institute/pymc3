@@ -1176,7 +1176,7 @@ class TestMLDA:
             Normal("x", 5.0, 1.0)
             for coarse_model in possible_coarse_models:
                 step = MLDA(coarse_models=[coarse_model], subsampling_rates=3)
-                trace = sample(chains=1, draws=500, tune=100, step=step)
+                trace = sample(chains=1, draws=500, tune=100, step=step, random_seed=123456)
                 acc.append(trace.get_sampler_stats("accepted").mean())
             assert acc[0] > acc[1] > acc[2], (
                 "Acceptance rate is not "
