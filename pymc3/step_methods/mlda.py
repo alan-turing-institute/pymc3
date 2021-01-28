@@ -29,6 +29,7 @@ from ..model import Model
 from .arraystep import ArrayStepShared, Competence, metrop_select
 from .compound import CompoundStep
 from .metropolis import *
+from .metropolis import UniformProposal, Proposal, delta_logp, tune
 
 __all__ = [
     "MetropolisMLDA",
